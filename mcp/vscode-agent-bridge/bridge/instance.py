@@ -21,6 +21,12 @@ logger = get_logger("instance")
 
 SPAWN_TIMEOUT = 30.0
 
+# Canonical shared cline-sr config dir, symlinked into every PID-scoped
+# session's globalStorage before spawn (ADR-0072).
+CANONICAL_CONFIG_DIR = Path(
+    os.path.expanduser("~/.vscode-agent-bridge/data/User/globalStorage/saoudrizwan.claude-dev")
+)
+
 # Suppress every first-run interactive prompt so a fresh dedicated window
 # needs no human click before cline-sr can run (task/77).
 SEED_SETTINGS = {
@@ -67,6 +73,25 @@ class InstanceManager:
             self._proc.terminate()
         self._alive = False
 
+    def _create_config_symlink(self) -> None:
+        """Symlink this session's globalStorage to canonical cline-sr config (ADR-0072)."""
+        tgt = CANONICAL_CONFIG_DIR
+        tgt.mkdir(parents=True, exist_ok=True)  # bootstrap: target must exist on fresh install
+        src = self._data_dir / "User" / "globalStorage" / "saoudrizwan.claude-dev"
+        if src.is_symlink():
+            if src.resolve() == tgt.resolve():
+                return  # already wired (idempotent re-entry)
+            raise RuntimeError(
+                f"{src} is a symlink to {os.readlink(src)}, expected {tgt}; remove the stale link"
+            )
+        if src.exists():
+            raise RuntimeError(
+                f"{src} exists as a real directory, expected symlink; "
+                "remove or migrate it before delegating"
+            )
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.symlink_to(tgt)
+
     def _seed_settings(self) -> None:
         settings_path = self._data_dir / "User" / "settings.json"
         settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,7 +116,9 @@ class InstanceManager:
             args.append("--reuse-window")
         args.append(workspace)
 
-        self._seed_settings()
+        if not self._alive:
+            self._create_config_symlink()
+            self._seed_settings()
         env = {**os.environ, "BRIDGE_PORT": str(port)}
         self._proc = await asyncio.create_subprocess_exec(*args, env=env)
         logger.info(

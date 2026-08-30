@@ -4,6 +4,7 @@ import os
 
 import pytest
 
+import bridge.instance
 from bridge.instance import (
     SEED_SETTINGS,
     InstanceManager,
@@ -36,11 +37,16 @@ def tmp_data_dir(tmp_path, monkeypatch):
         return real_expanduser(path)
 
     monkeypatch.setattr(os.path, "expanduser", _fake_expanduser)
+    monkeypatch.setattr(bridge.instance, "CANONICAL_CONFIG_DIR", tmp_path / "canonical")
     return tmp_path
 
 
 def _settings_path(manager: InstanceManager):
     return manager._data_dir / "User" / "settings.json"
+
+
+def _global_storage_path(manager: InstanceManager):
+    return manager._data_dir / "User" / "globalStorage" / "saoudrizwan.claude-dev"
 
 
 @pytest.fixture
@@ -211,4 +217,123 @@ def test_mark_disconnected_clears_alive():
     manager.mark_connected()
     assert manager.alive
     manager.mark_disconnected()
+    assert not manager.alive
+
+
+def test_create_config_symlink_fresh_install(tmp_data_dir):
+    manager = InstanceManager()
+    src = _global_storage_path(manager)
+    assert not bridge.instance.CANONICAL_CONFIG_DIR.exists()
+    assert not src.exists()
+
+    manager._create_config_symlink()
+
+    assert bridge.instance.CANONICAL_CONFIG_DIR.is_dir()
+    assert src.is_symlink()
+    assert src.resolve() == bridge.instance.CANONICAL_CONFIG_DIR.resolve()
+
+
+def test_create_config_symlink_idempotent_absolute_target(tmp_data_dir):
+    manager = InstanceManager()
+    src = _global_storage_path(manager)
+    tgt = bridge.instance.CANONICAL_CONFIG_DIR
+    tgt.mkdir(parents=True)
+    src.parent.mkdir(parents=True)
+    src.symlink_to(tgt.resolve())  # absolute target
+
+    manager._create_config_symlink()  # no-op, no exception
+
+    assert src.resolve() == tgt.resolve()
+
+
+def test_create_config_symlink_idempotent_relative_target(tmp_data_dir):
+    manager = InstanceManager()
+    src = _global_storage_path(manager)
+    tgt = bridge.instance.CANONICAL_CONFIG_DIR
+    tgt.mkdir(parents=True)
+    src.parent.mkdir(parents=True)
+    relative_target = os.path.relpath(tgt.resolve(), src.parent)
+    src.symlink_to(relative_target)  # relative target
+
+    manager._create_config_symlink()  # no-op, no exception
+
+    assert src.resolve() == tgt.resolve()
+
+
+def test_create_config_symlink_stale_link_raises(tmp_data_dir):
+    manager = InstanceManager()
+    src = _global_storage_path(manager)
+    elsewhere = tmp_data_dir / "elsewhere"
+    elsewhere.mkdir()
+    src.parent.mkdir(parents=True)
+    src.symlink_to(elsewhere)
+
+    with pytest.raises(RuntimeError):
+        manager._create_config_symlink()
+
+
+def test_create_config_symlink_real_directory_raises(tmp_data_dir):
+    manager = InstanceManager()
+    src = _global_storage_path(manager)
+    src.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError):
+        manager._create_config_symlink()
+
+
+async def test_ensure_ready_creates_symlink_before_spawn(tmp_data_dir, monkeypatch):
+    manager = InstanceManager()
+    src = _global_storage_path(manager)
+    symlinked_at_spawn_time = []
+
+    async def _create_subprocess_exec(*args, **kwargs):
+        symlinked_at_spawn_time.append(src.is_symlink())
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _create_subprocess_exec)
+
+    async def connect_soon():
+        await asyncio.sleep(0)
+        manager.mark_connected()
+
+    task = asyncio.create_task(connect_soon())
+    await manager.ensure_ready("/tmp/repo", port=4321)
+    await task
+
+    assert symlinked_at_spawn_time == [True]  # link exists by the time spawn is invoked
+    assert src.resolve() == bridge.instance.CANONICAL_CONFIG_DIR.resolve()
+
+
+async def test_ensure_ready_skips_symlink_and_reseed_on_reuse(fake_spawn, tmp_data_dir, monkeypatch):
+    manager = InstanceManager()
+    manager._alive = True
+    manager.workspace = "/tmp/old"
+    manager._connected.set()
+
+    calls: list[str] = []
+    monkeypatch.setattr(manager, "_create_config_symlink", lambda: calls.append("symlink"))
+    monkeypatch.setattr(manager, "_seed_settings", lambda: calls.append("seed"))
+
+    async def connect_soon():
+        await asyncio.sleep(0)
+        manager.mark_connected()
+
+    task = asyncio.create_task(connect_soon())
+    await manager.ensure_ready("/tmp/new", port=4321)
+    await task
+
+    assert calls == []  # already-wired session: no re-link, no re-seed on window reuse
+
+
+async def test_ensure_ready_propagates_symlink_error(fake_spawn, tmp_data_dir, monkeypatch):
+    manager = InstanceManager()
+
+    def _boom():
+        raise RuntimeError("stale link")
+
+    monkeypatch.setattr(manager, "_create_config_symlink", _boom)
+
+    with pytest.raises(RuntimeError):
+        await manager.ensure_ready("/tmp/repo", port=4321)
+    assert fake_spawn == []
     assert not manager.alive
