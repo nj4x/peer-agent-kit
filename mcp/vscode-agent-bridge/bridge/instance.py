@@ -50,6 +50,7 @@ class InstanceManager:
     def __init__(self, code_bin: str = "code") -> None:
         self._code_bin = code_bin
         self.workspace: str | None = None
+        self._open_root: Path | None = None  # Actual folder open in VS Code (ADR-0073)
         self._alive = False
         self._connected = asyncio.Event()
         self._proc: asyncio.subprocess.Process | None = None
@@ -106,15 +107,31 @@ class InstanceManager:
             settings_path.write_text(json.dumps(merged, indent=2) + "\n")
 
     async def ensure_ready(self, workspace: str, port: int) -> None:
-        """Spawn or reuse the dedicated window so `workspace` is open in it."""
-        if self._alive and self.workspace == workspace:
+        """Spawn or reuse the dedicated window so `workspace` is open in it.
+
+        Uses path normalization and sub-workspace containment check (ADR-0073):
+        - Normalizes the requested workspace via Path.resolve() (self._open_root is
+          already resolved when it was previously set)
+        - Skips window reload if requested workspace is nested under open root
+        - Updates self._open_root only on spawn/reuse-window, not on sub-workspace shortcut
+        """
+        workspace_resolved = Path(workspace).resolve()
+
+        # Sub-workspace check: if new workspace is nested in open root, skip window reload.
+        # self._open_root tracks the actual VS Code folder (the last path passed to `code`);
+        # self.workspace is caller-facing metadata and is updated independently.
+        if self._alive and self._open_root and workspace_resolved.is_relative_to(self._open_root):
+            self.workspace = str(workspace_resolved)  # update metadata only; _open_root unchanged
             return
 
+        # Different workspace: open in reused window (or spawn if not alive)
+        # (Note: is_relative_to also returns True for exact equality, so no separate
+        # exact-match guard is needed — the branch above already handles it.)
         self._connected.clear()
         args = [self._code_bin, "--user-data-dir", str(self._data_dir)]
         if self._alive:
             args.append("--reuse-window")
-        args.append(workspace)
+        args.append(str(workspace_resolved))
 
         if not self._alive:
             self._create_config_symlink()
@@ -124,7 +141,7 @@ class InstanceManager:
         logger.info(
             "VS Code spawn: pid=%d workspace=%s port=%d data_dir=%s",
             self._proc.pid,
-            workspace,
+            workspace_resolved,
             port,
             self._data_dir,
         )
@@ -135,4 +152,5 @@ class InstanceManager:
             await asyncio.wait_for(self._connected.wait(), timeout=SPAWN_TIMEOUT)
         except asyncio.TimeoutError as exc:
             raise InstanceUnreachable(f"extension did not connect within {SPAWN_TIMEOUT}s") from exc
-        self.workspace = workspace
+        self.workspace = str(workspace_resolved)
+        self._open_root = workspace_resolved  # record actual VS Code folder for future containment checks

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -74,26 +75,116 @@ async def test_ensure_ready_spawns_without_reuse_window_when_dead(fake_spawn):
 
     args, kwargs = fake_spawn[0]
     assert "--reuse-window" not in args
-    assert args[-1] == "/tmp/repo"
+    # Path is normalized (symlinks resolved, e.g., /tmp -> /private/tmp on macOS)
+    assert args[-1] == str(Path("/tmp/repo").resolve())
     assert kwargs["env"]["BRIDGE_PORT"] == "4321"
-    assert manager.workspace == "/tmp/repo"
+    assert manager.workspace == str(Path("/tmp/repo").resolve())
     assert manager.alive
 
 
-async def test_ensure_ready_skips_spawn_when_already_open(fake_spawn):
+async def test_ensure_ready_skips_spawn_when_already_open(fake_spawn, tmp_path):
     manager = InstanceManager()
     manager._alive = True
-    manager.workspace = "/tmp/repo"
+    manager._open_root = tmp_path / "repo"
     manager._connected.set()
 
-    await manager.ensure_ready("/tmp/repo", port=4321)
+    await manager.ensure_ready(str((tmp_path / "repo").resolve()), port=4321)
     assert fake_spawn == []
 
 
-async def test_ensure_ready_reuses_window_on_workspace_switch(fake_spawn):
+async def test_ensure_ready_skips_spawn_for_sub_workspace(fake_spawn, tmp_path):
+    """Sub-workspace nested under open root should skip window reload (ADR-0073)."""
+    repo = tmp_path / "repo"
+    repo_src = repo / "src"
+    repo.mkdir()
+    repo_src.mkdir()
+
     manager = InstanceManager()
     manager._alive = True
-    manager.workspace = "/tmp/old"
+    manager.workspace = str(repo.resolve())
+    manager._open_root = repo.resolve()  # Parent workspace is open
+    manager._connected.set()
+
+    await manager.ensure_ready(str(repo_src), port=4321)
+
+    assert fake_spawn == []  # No spawn for sub-workspace
+    assert manager.workspace == str(repo_src.resolve())
+    assert manager._open_root == repo.resolve()  # _open_root unchanged
+
+
+async def test_ensure_ready_sibling_sub_workspaces_both_short_circuit(fake_spawn, tmp_path):
+    """Sibling sub-workspaces under the same open root both skip window reload (ADR-0073)."""
+    project = tmp_path / "project"
+    project_src = project / "src"
+    project_tests = project / "tests"
+    project.mkdir()
+    project_src.mkdir()
+    project_tests.mkdir()
+
+    manager = InstanceManager()
+    manager._alive = True
+    manager._open_root = project.resolve()
+    manager._connected.set()
+
+    await manager.ensure_ready(str(project_src), port=4321)
+    await manager.ensure_ready(str(project_tests), port=4322)
+
+    assert fake_spawn == []  # neither sibling triggers a spawn/reuse-window call
+    assert manager._open_root == project.resolve()  # open root never changes
+    assert manager.workspace == str(project_tests.resolve())
+
+
+async def test_ensure_ready_path_normalization_trailing_slash(fake_spawn, tmp_path):
+    """Trailing slashes should not cause false mismatches (ADR-0073)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    manager = InstanceManager()
+
+    async def connect_soon():
+        await asyncio.sleep(0)
+        manager.mark_connected()
+
+    # First spawn with /repo
+    task = asyncio.create_task(connect_soon())
+    await manager.ensure_ready(str(repo), port=4321)
+    await task
+
+    assert len(fake_spawn) == 1
+    assert manager._open_root == repo.resolve()
+
+    # Request with trailing slash - should skip spawn due to normalization
+    task = asyncio.create_task(connect_soon())
+    await manager.ensure_ready(str(repo) + "/", port=4321)
+    await task
+
+    assert len(fake_spawn) == 1  # No additional spawn
+
+
+async def test_ensure_ready_path_normalization_symlink_alias(fake_spawn, tmp_path):
+    """A symlink alias resolving into the open root should not trigger a reload (ADR-0073)."""
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real)
+
+    manager = InstanceManager()
+    manager._alive = True
+    manager._open_root = real.resolve()
+    manager._connected.set()
+
+    await manager.ensure_ready(str(alias), port=4321)
+
+    assert fake_spawn == []
+    assert manager._open_root == real.resolve()  # unchanged
+    assert manager.workspace == str(real.resolve())
+
+
+async def test_ensure_ready_reuses_window_on_workspace_switch(fake_spawn, tmp_path):
+    manager = InstanceManager()
+    manager._alive = True
+    manager._open_root = tmp_path / "old"
+    manager.workspace = str(tmp_path / "old")
     manager._connected.set()
 
     async def connect_soon():
@@ -101,13 +192,15 @@ async def test_ensure_ready_reuses_window_on_workspace_switch(fake_spawn):
         manager.mark_connected()
 
     task = asyncio.create_task(connect_soon())
-    await manager.ensure_ready("/tmp/new", port=4321)
+    await manager.ensure_ready(str(tmp_path / "new"), port=4321)
     await task
 
     args, _ = fake_spawn[0]
     assert "--reuse-window" in args
-    assert args[-1] == "/tmp/new"
-    assert manager.workspace == "/tmp/new"
+    new_resolved = str((tmp_path / "new").resolve())
+    assert args[-1] == new_resolved
+    assert manager.workspace == new_resolved
+    assert manager._open_root == (tmp_path / "new").resolve()
 
 
 async def test_ensure_ready_times_out_if_extension_never_connects(fake_spawn, monkeypatch):

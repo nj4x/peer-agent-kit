@@ -31,15 +31,15 @@ SRS-PAK-004, SRS-PAK-005
 
 ## Status
 
-ready-for-agent
+done
 
 ## Checklist
 
-- [ ] `tests/test_instance.py:65–72` updated: set `manager._open_root = tmp_path / 'repo'` before calling `ensure_ready(str((tmp_path / 'repo').resolve()), ...)` so the short-circuit guard `is_relative_to` fires and the no-spawn assertion holds
-- [ ] `tests/test_instance.py:75–92` (`test_ensure_ready_reuses_window_on_workspace_switch`) updated to use `tmp_path` instead of hardcoded `/tmp/repo` and `/tmp/new` paths; still asserts reuse-window behavior
-- [ ] Trailing-slash and symlink-alias workspaces no longer trigger a reload (tests with tmp_path symlinks, assertions compare resolved paths)
-- [ ] Sub-workspace of open root: no subprocess call, `workspace` updated, `_open_root` unchanged
-- [ ] Sibling sub-workspaces both short-circuit under the same open root
-- [ ] Disjoint workspace still triggers `--reuse-window` and updates `_open_root`
-- [ ] First spawn sets both `workspace` and `_open_root` to the resolved path
-- [ ] Full pytest suite passes
+- [x] `tests/test_instance.py:65–72` updated: set `manager._open_root = tmp_path / 'repo'` before calling `ensure_ready(str((tmp_path / 'repo').resolve()), ...)` so the short-circuit guard `is_relative_to` fires and the no-spawn assertion holds — test `test_ensure_ready_skips_spawn_when_already_open` passed
+- [x] `tests/test_instance.py:75–92` (`test_ensure_ready_reuses_window_on_workspace_switch`) updated to use `tmp_path` instead of hardcoded `/tmp/repo` and `/tmp/new` paths; still asserts reuse-window behavior — test `test_ensure_ready_reuses_window_on_workspace_switch` passed
+- [x] Trailing-slash and symlink-alias workspaces no longer trigger a reload (tests with tmp_path symlinks, assertions compare resolved paths) — tests `test_ensure_ready_path_normalization_trailing_slash`, `test_ensure_ready_path_normalization_symlink_alias` passed
+- [x] Sub-workspace of open root: no subprocess call, `workspace` updated, `_open_root` unchanged — test `test_ensure_ready_skips_spawn_for_sub_workspace` passed
+- [x] Sibling sub-workspaces both short-circuit under the same open root — test `test_ensure_ready_sibling_sub_workspaces_both_short_circuit` passed
+- [x] Disjoint workspace still triggers `--reuse-window` and updates `_open_root` — test `test_ensure_ready_reuses_window_on_workspace_switch` passed (asserts `--reuse-window` in args and `_open_root` updated)
+- [x] First spawn sets both `workspace` and `_open_root` to the resolved path — test `test_ensure_ready_path_normalization_trailing_slash` passed (asserts `_open_root == repo.resolve()` after first spawn)
+- [x] Full pytest suite passes — 91 passed, 0 failed (`.venv/bin/pytest`)
