@@ -32,15 +32,15 @@ SRS-PAK-001, SRS-PAK-002
 
 ## Status
 
-ready-for-agent
+done
 
 ## Checklist
 
-- [ ] Dirs with dead PIDs removed on `InstanceManager` construction
-- [ ] Dirs with live PIDs, the own-PID dir, and the canonical `data` dir untouched
-- [ ] Non-integer suffixes skipped without error
-- [ ] Oversized PID suffix (parses as int but out of `pid_t` range, e.g. `data-9999999999`) triggers `OverflowError` from `os.kill`, caught, dir swept, no exception raised
-- [ ] Symlinks inside swept dirs unlinked, link targets untouched (test with a symlink into a surviving dir)
-- [ ] Removal failure logged at WARNING, sweep continues, `__init__` does not raise
-- [ ] PID-reuse scenario: pre-create `~/.vscode-agent-bridge/data-{self._pid}` with a correct symlink and valid settings.json; construct InstanceManager with the same PID; verify the sweep does not remove it (own-dir guard), `ensure_ready` succeeds (idempotent symlink guard, `_seed_settings` merge), no exceptions raised
-- [ ] Full pytest suite passes
+- [x] Dirs with dead PIDs removed on `InstanceManager` construction — test `test_sweep_removes_dead_pid_dirs` passed
+- [x] Dirs with live PIDs, the own-PID dir, and the canonical `data` dir untouched — test `test_sweep_keeps_live_pid_own_pid_and_canonical_dirs` passed
+- [x] Non-integer suffixes skipped without error — test `test_sweep_skips_non_integer_suffix` passed
+- [x] Oversized PID suffix (parses as int but out of `pid_t` range, e.g. `data-9999999999`) triggers `OverflowError` from `os.kill`, caught, dir swept, no exception raised — test `test_sweep_oversized_pid_suffix_swept_via_overflow_error` passed (also asserts the WARNING log per the Error policy section above)
+- [x] Symlinks inside swept dirs unlinked, link targets untouched (test with a symlink into a surviving dir) — test `test_sweep_unlinks_symlink_inside_dead_dir_without_following` passed
+- [x] Removal failure logged at WARNING, sweep continues, `__init__` does not raise — test `test_sweep_removal_failure_logged_warning_and_continues` passed
+- [x] PID-reuse scenario: pre-create `~/.vscode-agent-bridge/data-{self._pid}` with a correct symlink and valid settings.json; construct InstanceManager with the same PID; verify the sweep does not remove it (own-dir guard), `ensure_ready` succeeds (idempotent symlink guard, `_seed_settings` merge), no exceptions raised — test `test_sweep_pid_reuse_own_dir_guard_then_ensure_ready_succeeds` passed (asserts `os.kill` is never called for the reused PID, confirming the own-dir guard, not just the sweep outcome)
+- [x] Full pytest suite passes — `.venv/bin/pytest -q`: 98 passed

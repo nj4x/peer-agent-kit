@@ -20,7 +20,17 @@ _Avoid_: task file, record log
 Per-session policy for when and what the local LLM should delegate to the peer agent (cline-sr). Modes (off/lite/full/max) control which work stays local vs. farms to the peer. Mode persists repo-scoped in `.claude/.peer-agent-mode` (with repo) or globally in `~/.claude/.peer-agent-active` (no repo), so each session starts in the mode last set.
 _Avoid_: delegation policy, work mode, peer mode
 
+**Open root**:
+`InstanceManager._open_root` — the folder actually open in the dedicated VS Code window (the last path passed to `code`). Distinct from `InstanceManager.workspace`, which is caller-facing metadata updated on every `ensure_ready()` call, including sub-workspace short-circuits that leave `_open_root` untouched.
+_Avoid_: workspace root, active folder
+
 ## Architecture decisions
+
+**Session-scoped VS Code instance** (ADR-0071, ADR-0072, ADR-0075):
+Each MCP server process gets its own dedicated VS Code window, keyed by server PID (`~/.vscode-agent-bridge/data-<pid>`), instead of sharing one fixed data dir across concurrent Claude Code sessions. This eliminates the collision where a second session's `BRIDGE_PORT` never reaches the shared window's extension. Each PID-scoped data dir gets its `User/globalStorage/saoudrizwan.claude-dev` symlinked to a canonical shared directory (`~/.vscode-agent-bridge/data/User/globalStorage/saoudrizwan.claude-dev`, ADR-0072) before spawn, so every session shares cline-sr's API keys, memory, and preferences despite having an isolated window. Orphaned `data-<pid>` dirs from dead server processes are swept on `InstanceManager.__init__` via a liveness probe (`os.kill(pid, 0)`), best-effort and non-fatal.
+
+**Sub-workspace dispatch** (ADR-0073):
+`InstanceManager.ensure_ready(workspace)` resolves both the requested and currently-open paths with `Path.resolve()` before comparing, eliminating false mismatches from trailing slashes or symlink aliases. If the requested workspace is nested under `_open_root` (`workspace_resolved.is_relative_to(_open_root)`), the manager short-circuits: no `code --reuse-window` call, no window reload, `workspace` metadata updates but `_open_root` does not. Because no reload happens, cline-sr receives no workspace-root-change signal and keeps resolving relative paths against the open root — task prompts targeting a sub-workspace must use absolute paths or paths relative to the open root (see `skills/peer-agent/SKILL.md`).
 
 **Why peer-agent-kit is separate from caveman-kit:**
 Each kit solves orthogonal concerns — caveman is terse writing style, peer-agent is work delegation — and should be installable independently. Both kits use the same hook/badge injection machinery, but target different rules. Separating them lets users adopt either, both, or neither without version coupling.

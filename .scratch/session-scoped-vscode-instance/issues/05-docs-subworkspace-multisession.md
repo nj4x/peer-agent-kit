@@ -29,11 +29,11 @@ SRS-PAK-001, SRS-PAK-004, SRS-PAK-005
 
 ## Status
 
-ready-for-agent
+done
 
 ## Checklist
 
-- [ ] SKILL.md briefing guidance added (absolute or open-root-relative paths for sub-workspace tasks)
-- [ ] CONTEXT.md covers sub-workspace dispatch and session-scoped instances
-- [ ] ADR-0069 scope statement revised with a pointer to ADRs 0071–0075
-- [ ] Terminology matches CONTEXT.md ubiquitous language (Bridge, Session, Delegation mode)
+- [x] SKILL.md briefing guidance added (absolute or open-root-relative paths for sub-workspace tasks) — code: skills/peer-agent/SKILL.md "Sub-workspace targets" paragraph, verified by review agent against ADR-0073 and instance.py
+- [x] CONTEXT.md covers sub-workspace dispatch and session-scoped instances — code: CONTEXT.md "Session-scoped VS Code instance" and "Sub-workspace dispatch" entries under Architecture decisions, plus "Open root" ubiquitous-language entry; verified against instance.py by review agent
+- [x] ADR-0069 scope statement revised with a pointer to ADRs 0071–0075 — code: docs/adr/0069-vscode-agent-bridge-observability.md "Scope: multi-session now supported" paragraph, points to ADRs 0071, 0072, 0073, 0075 (0074 omitted, unrelated to multi-session)
+- [x] Terminology matches CONTEXT.md ubiquitous language (Bridge, Session, Delegation mode) — code review agent confirmed capitalization/usage consistent with existing CONTEXT.md entries

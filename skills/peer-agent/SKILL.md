@@ -47,6 +47,8 @@ These apply at every mode.
 
 The first call spawns the dedicated VS Code window if it is not already up — expect extra latency on a cold start.
 
+**Sub-workspace targets**: if the delegated task's workspace is nested inside the folder already open in the dedicated window (e.g., open root `/project`, task workspace `/project/src`), the bridge reuses the window without a reload — cline-sr receives no workspace-root-change signal and keeps resolving relative paths against the open root, not the sub-workspace. When briefing a sub-workspace task, reference files by absolute path or by path relative to the open root, never relative to the sub-workspace.
+
 ## Bridge down
 
 On the first delegation failure with reason `instance_down` in a session, tell the user once that the peer is unavailable and continue locally. Retry only when the user asks or a new session starts.
