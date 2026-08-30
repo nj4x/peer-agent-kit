@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # peer-agent-kit uninstaller.
 #
-# Restores settings.json and statusline.sh byte-exact from the backups
-# install.sh made. ~/.claude.json is Claude Code's mutable state store, so it
-# is restored surgically instead: only the mcpServers.vscode-agent-bridge
-# entry is reverted (lib/mcp-unpatch.js), the rest of the live file is kept.
+# Surgically removes peer-agent-kit entries from settings.json and statusline.sh
+# using marker-based detection (not byte-exact restore from backups):
+# - settings.json: removes hook entries containing 'peer-agent-activate.js' and
+#   'peer-agent-mode-tracker.js' via lib/settings-unpatch.js
+# - statusline.sh: removes the block between '# PEER_AGENT-KIT BEGIN' and
+#   '# PEER_AGENT-KIT END' via lib/statusline-unpatch.js
+# ~/.claude.json is the mutable state store, so it is restored surgically:
+# only the mcpServers.vscode-agent-bridge entry is reverted (lib/mcp-unpatch.js),
+# the rest of the live file is kept.
 # Then removes ~/.peer-agent-kit.
 set -euo pipefail
 
@@ -29,29 +34,25 @@ if [ ! -f "$MANIFEST" ]; then
 fi
 
 CLAUDE_DIR="$(node -e "console.log(JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')).claudeDir)")"
-SETTINGS_BACKUP="$(node -e "console.log(JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')).settingsBackup)")"
-STATUSLINE_BACKUP="$(node -e "const m=JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')); console.log(m.statuslineBackup || '')")"
 SKILL_INSTALLED_BY_KIT="$(node -e "const m=JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')); console.log(m.skillInstalledByKit === true ? 'true' : 'false')")"
-SKILL_BACKUP="$(node -e "const m=JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')); console.log(m.skillBackup || '')")"
 
 SETTINGS="$CLAUDE_DIR/settings.json"
 STATUSLINE="$CLAUDE_DIR/statusline.sh"
 MCP_CONFIG="${HOME}/.claude.json"
 
-if [ ! -f "$SETTINGS_BACKUP" ]; then
-  echo "error: settings backup not found at $SETTINGS_BACKUP" >&2
-  exit 1
+# Surgically remove peer-agent hooks from settings.json using marker-based detection
+if [ -f "$SETTINGS" ]; then
+  node "$KIT_DIR/lib/settings-unpatch.js" "$SETTINGS"
+  echo "restored: $SETTINGS (surgical removal)"
+else
+  echo "warning: $SETTINGS not found — skipping settings unpatch" >&2
 fi
-cp "$SETTINGS_BACKUP" "$SETTINGS"
-echo "restored: $SETTINGS"
 
-if [ -n "$STATUSLINE_BACKUP" ]; then
-  if [ -f "$STATUSLINE_BACKUP" ]; then
-    cp "$STATUSLINE_BACKUP" "$STATUSLINE"
-    echo "restored: $STATUSLINE"
-  else
-    echo "warning: statusline backup recorded but missing at $STATUSLINE_BACKUP — left $STATUSLINE untouched" >&2
-  fi
+# Surgically remove peer-agent badge block from statusline.sh using sentinel markers
+if [ -f "$STATUSLINE" ] && [ ! -L "$STATUSLINE" ]; then
+  node "$KIT_DIR/lib/statusline-unpatch.js" "$STATUSLINE"
+else
+  echo "warning: $STATUSLINE not found (or is a symlink) — skipping statusline unpatch" >&2
 fi
 
 # Restore MCP config surgically using mcp-unpatch.js
