@@ -70,7 +70,7 @@ export function activate(context: vscode.ExtensionContext): void {
   connect(port);
   noConnectTimer = setTimeout(() => {
     if (ws === undefined) {
-      vscode.commands.executeCommand("workbench.action.closeWindow");
+      vscode.commands.executeCommand("workbench.action.quit");
     }
   }, 30_000);
   context.subscriptions.push({
@@ -116,7 +116,7 @@ function connect(port: string): void {
   });
 
   const closeWindow = () => {
-    vscode.commands.executeCommand("workbench.action.closeWindow");
+    vscode.commands.executeCommand("workbench.action.quit");
   };
 
   const retry = () => {
