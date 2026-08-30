@@ -41,14 +41,57 @@ if [ -d "$KIT_HOME" ]; then
   exit 1
 fi
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "error: node not found on PATH" >&2
-  exit 1
+# --- Prerequisites: auto-install what we can, warn about the rest -----------
+
+# node/npm — required for hooks and extension build. Try Homebrew if absent.
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+  if command -v brew >/dev/null 2>&1; then
+    echo "node/npm not found — installing via Homebrew..."
+    brew install node || { echo "error: brew install node failed" >&2; exit 1; }
+  else
+    echo "error: node/npm not found and Homebrew unavailable — install Node.js first: https://nodejs.org" >&2
+    exit 1
+  fi
 fi
 
-if ! command -v npm >/dev/null 2>&1; then
-  echo "error: npm not found on PATH (required for extension build)" >&2
-  exit 1
+# uv — required to run the MCP server. Official installer puts it in ~/.local/bin.
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv not found — installing via https://astral.sh/uv ..."
+  if curl -LsSf https://astral.sh/uv/install.sh | sh; then
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "error: uv install failed — install manually: https://docs.astral.sh/uv/getting-started/" >&2
+    exit 1
+  fi
+fi
+
+# Python >= 3.10 — uv can provision its own interpreter; pre-fetch so the
+# first MCP launch isn't slow.
+uv python install >/dev/null 2>&1 || true
+
+# VS Code CLI — needed at runtime for the bridge to spawn its window.
+# Can't install the app; on macOS point at the bundled CLI if the app exists.
+if ! command -v code >/dev/null 2>&1; then
+  VSCODE_APP_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin"
+  if [ -d "$VSCODE_APP_BIN" ]; then
+    echo "warning: 'code' CLI not in PATH. Add it to your shell profile:" >&2
+    echo "  export PATH=\"$VSCODE_APP_BIN:\$PATH\"" >&2
+  else
+    echo "warning: VS Code not found — the bridge cannot spawn its window until VS Code + 'code' CLI are installed" >&2
+  fi
+fi
+
+# cline-sr — the peer agent itself; no public marketplace id, so check-only.
+if ! ls "$HOME/.vscode/extensions" 2>/dev/null | grep -qi 'cline-sr'; then
+  echo "warning: cline-sr extension not detected in ~/.vscode/extensions — install it in VS Code before delegating" >&2
+fi
+CLINE_STATE="$HOME/.cline-sr/data/globalState.json"
+if [ -f "$CLINE_STATE" ] && command -v node >/dev/null 2>&1; then
+  HOOKS_ENABLED="$(node -e "try{const s=JSON.parse(require('fs').readFileSync('$CLINE_STATE','utf8'));console.log(s.hooksEnabled===false?'false':'true')}catch(e){console.log('true')}")"
+  if [ "$HOOKS_ENABLED" = "false" ]; then
+    echo "warning: cline-sr Hooks are disabled — enable Hooks in cline-sr settings or the bridge cannot track tasks" >&2
+  fi
 fi
 
 if [ ! -f "$SETTINGS" ]; then
@@ -107,6 +150,20 @@ else
   echo "warning: npm ci failed — skipping extension build" >&2
 fi
 cd "$KIT_DIR"
+
+# Pre-warm the MCP server environment so the first launch isn't a cold
+# dependency install; uv run (used by the registration) reuses this env.
+echo "setting up MCP server environment..."
+if uv sync --directory "$KIT_DIR/mcp/vscode-agent-bridge" >/dev/null 2>&1; then
+  # Smoke check: the server module must import cleanly.
+  if uv run --directory "$KIT_DIR/mcp/vscode-agent-bridge" python -c "import server" >/dev/null 2>&1; then
+    echo "MCP server environment ready"
+  else
+    echo "warning: MCP server env created but 'import server' failed — check 'uv run --directory $KIT_DIR/mcp/vscode-agent-bridge python -c \"import server\"'" >&2
+  fi
+else
+  echo "warning: uv sync failed — the MCP server will install dependencies on first launch" >&2
+fi
 
 # Register MCP server in ~/.claude.json, backing up the original entry if present
 echo "registering vscode-agent-bridge MCP server..."
