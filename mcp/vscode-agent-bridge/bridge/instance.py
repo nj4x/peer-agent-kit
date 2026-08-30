@@ -11,10 +11,13 @@ outcome — it is the companion extension's WebSocket connection, tracked via
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
 import os
 import shutil
 import sqlite3
+import sys
 from pathlib import Path
 
 from bridge.logsetup import get_logger
@@ -241,6 +244,108 @@ class InstanceManager:
                 except Exception:  # noqa: BLE001
                     pass  # best effort, don't interrupt finally chain
 
+    def _workspace_storage_id(self, folder: Path) -> str | None:
+        """Compute VS Code's workspaceStorage dir name for a folder.
+
+        Mirrors createSingleFolderWorkspaceId (vscode workspaces.ts):
+        md5(fsPath + String(ctime)) where ctime is birthtime-ms on macOS/Windows
+        and the inode on Linux (birthtime unreliable there). Node rounds the
+        fractional ms half-up (dateFromMs adds 0.5 before Date truncation), so
+        plain int() truncation here would drift by 1ms on ~half of folders and
+        produce a hash VS Code never looks up.
+
+        Rounding verified against six real VS Code-created dirs on macOS only;
+        the Windows branch is untested best-effort (a mismatch degrades to
+        default layout, never an error).
+        """
+        try:
+            st = folder.stat()
+        except OSError:
+            return None
+        ctime: int | None = None
+        if sys.platform == "darwin" or os.name == "nt":
+            birthtime_ns = getattr(st, "st_birthtime_ns", None)  # Python >= 3.12
+            if birthtime_ns is not None:
+                sec, nsec = divmod(birthtime_ns, 1_000_000_000)
+                ctime = math.trunc(sec * 1000.0 + nsec / 1e6 + 0.5)
+            elif hasattr(st, "st_birthtime"):
+                ctime = math.trunc(st.st_birthtime * 1000 + 0.5)
+        elif sys.platform.startswith("linux"):
+            ctime = st.st_ino
+        digest = hashlib.md5(usedforsecurity=False)
+        digest.update(str(folder).encode())
+        # Truthiness intentional: mirrors VS Code's `ctime ? String(ctime) : ''`
+        # (0 is falsy in JS too, so both sides append nothing for ctime=0).
+        if ctime:
+            digest.update(str(ctime).encode())
+        return digest.hexdigest()
+
+    def _seed_workspace_layout(self, folder: Path) -> None:
+        """Seed an unseen folder's workspaceStorage from the empty-window layout (ADR-0078).
+
+        Best-effort: any failure degrades to VS Code's default layout for that
+        folder, never blocks the open.
+        """
+        try:
+            self._seed_workspace_layout_unsafe(folder)
+        except Exception as exc:  # noqa: BLE001 - best-effort per ADR-0078 failure policy
+            logger.warning("workspace layout seed failed, continuing: %s", exc)
+
+    def _seed_workspace_layout_unsafe(self, folder: Path) -> None:
+        ws_id = self._workspace_storage_id(folder)
+        if ws_id is None:
+            return
+        dest = self._data_dir / "User" / "workspaceStorage" / ws_id
+        if dest.exists():
+            return  # already seeded or previously opened: existing state stands (D6)
+        src_db = self._find_empty_window_state_db()
+        if src_db is None:
+            return
+        dest_db = dest / "state.vscdb"
+        self._backup_sqlite_file(src_db, dest_db)
+        if not dest_db.exists():
+            # Backup failed (already logged). Remove the bare dir so the
+            # exists-check doesn't block a future seed attempt.
+            try:
+                dest.rmdir()
+            except OSError:
+                pass
+            return
+        try:
+            (dest / "workspace.json").write_text(
+                json.dumps({"folder": folder.as_uri()}, indent=2) + "\n"
+            )
+        except OSError:
+            # Same rationale as above: don't leave a dir the exists-check
+            # would treat as fully seeded.
+            dest_db.unlink(missing_ok=True)
+            try:
+                dest.rmdir()
+            except OSError:
+                pass
+            raise
+
+    def _find_empty_window_state_db(self) -> Path | None:
+        """Latest empty-window state.vscdb in this session's workspaceStorage.
+
+        Empty-window dirs carry no workspace.json (folder and .code-workspace
+        dirs do) — they hold the pane layout the user arranged in the template
+        window, copied here at session start by the template-profile bootstrap.
+        """
+        root = self._data_dir / "User" / "workspaceStorage"
+        if not root.is_dir():
+            return None
+        candidates: list[Path] = []
+        for entry in root.iterdir():
+            if entry.is_symlink() or not entry.is_dir() or (entry / "workspace.json").exists():
+                continue
+            db = entry / "state.vscdb"
+            if db.is_file():
+                candidates.append(db)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+
     def _seed_settings(self) -> None:
         settings_path = self._data_dir / "User" / "settings.json"
         settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -285,6 +390,9 @@ class InstanceManager:
             self._create_config_symlink()
             self._copy_template_profile()
             self._seed_settings()
+        # Every spawn/reuse open reloads the window, which re-reads the target
+        # folder's workspaceStorage — seed it first if unseen (ADR-0078).
+        self._seed_workspace_layout(workspace_resolved)
         env = {**os.environ, "BRIDGE_PORT": str(port)}
         self._proc = await asyncio.create_subprocess_exec(*args, env=env)
         logger.info(

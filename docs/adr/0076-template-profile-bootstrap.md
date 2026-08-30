@@ -45,7 +45,7 @@ Two cooperating mechanisms:
 - **Pro**: Fresh dedicated windows need no human click before cline-sr can run — URI trust and Copilot sign-in join the already-suppressed first-run prompts.
 - **Pro**: Theme, keybindings, snippets, and pane geometry persist across sessions once the user configures the template a single time; no per-session setup.
 - **Pro**: No new dependencies — SQLite backup uses stdlib `sqlite3`; the template dir and its sweep exclusion already exist (ADR-0071/0072).
-- **Con**: Pane geometry applies only when the session's workspace path exactly matches a path previously opened in the template window (workspace-hash keying). Accepted limitation, not a gap to fix.
+- **Con**: Pane geometry applies only when the session's workspace path exactly matches a path previously opened in the template window (workspace-hash keying). ~~Accepted limitation, not a gap to fix.~~ Closed by ADR-0078 (per-workspace layout seeding from the empty-window state).
 - **Con**: One new interactive `install.sh` step. Mitigated: TTY-gated (silent skip in CI), confirmation-prompted, fire-and-forget.
 - **Con**: Copied profile is a spawn-time snapshot; template edits made after a session spawns do not propagate to that session. Next fresh spawn picks them up.
 - **Con**: The copy is best-effort by design (see Failure policy): a copy error yields a seed-only session with default appearance rather than a visible spawn failure, so a persistently failing copy surfaces only in WARNING logs. Accepted — cosmetic degradation must not block delegation.

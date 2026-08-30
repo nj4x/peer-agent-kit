@@ -1,8 +1,11 @@
 import asyncio
+import hashlib
+import math
 import json
 import os
 import shutil
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
@@ -718,6 +721,273 @@ def test_copy_template_profile_vscdb_backup_skips_sidecars(tmp_data_dir):
     dest = _dest_user_dir(manager)
     assert (dest / "workspaceStorage" / "ws" / "state.vscdb").exists()
     assert not (dest / "workspaceStorage" / "ws" / "state.vscdb-wal").exists()
+
+
+# --- per-workspace layout seeding (ADR-0078) ---
+
+
+def _make_empty_window_storage(
+    manager: InstanceManager, name: str = "1788116271141", value: str = "layout"
+) -> Path:
+    db = manager._data_dir / "User" / "workspaceStorage" / name / "state.vscdb"
+    _make_vscdb(db, value)
+    return db
+
+
+def test_workspace_storage_id_is_stable_md5_hex(tmp_data_dir, tmp_path):
+    manager = InstanceManager()
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    first = manager._workspace_storage_id(folder)
+    second = manager._workspace_storage_id(folder)
+    assert first == second
+    assert len(first) == 32
+    assert all(c in "0123456789abcdef" for c in first)
+
+
+def test_workspace_storage_id_differs_per_folder(tmp_data_dir, tmp_path):
+    manager = InstanceManager()
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    assert manager._workspace_storage_id(a) != manager._workspace_storage_id(b)
+
+
+def test_workspace_storage_id_none_for_missing_folder(tmp_data_dir, tmp_path):
+    manager = InstanceManager()
+    assert manager._workspace_storage_id(tmp_path / "gone") is None
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS birthtime formula")
+def test_workspace_storage_id_matches_vscode_formula_macos(tmp_data_dir, tmp_path):
+    """VS Code (macOS): md5(fsPath + String(birthtime ms)) — workspaces.ts.
+
+    Node rounds fractional ms half-up (dateFromMs adds 0.5), hence the +0.5.
+    Formula verified against six real workspaceStorage dirs VS Code created.
+    """
+    manager = InstanceManager()
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    st = folder.stat()
+    ms = math.trunc(st.st_birthtime * 1000 + 0.5)
+    expected = hashlib.md5((str(folder) + str(ms)).encode()).hexdigest()
+    assert manager._workspace_storage_id(folder) == expected
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux inode formula")
+def test_workspace_storage_id_matches_vscode_formula_linux(tmp_data_dir, tmp_path):
+    """VS Code (Linux): md5(fsPath + String(inode)) — birthtime unreliable there."""
+    manager = InstanceManager()
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    expected = hashlib.md5((str(folder) + str(folder.stat().st_ino)).encode()).hexdigest()
+    assert manager._workspace_storage_id(folder) == expected
+
+
+def test_seed_workspace_layout_cleans_up_when_workspace_json_write_fails(
+    tmp_data_dir, tmp_path, monkeypatch, caplog
+):
+    manager = InstanceManager()
+    _make_empty_window_storage(manager)
+    folder = (tmp_path / "proj").resolve()
+    folder.mkdir()
+
+    real_write_text = Path.write_text
+
+    def _fail_on_workspace_json(self, *args, **kwargs):
+        if self.name == "workspace.json":
+            raise OSError("disk full")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _fail_on_workspace_json)
+    with caplog.at_level("WARNING"):
+        manager._seed_workspace_layout(folder)  # must not raise
+
+    ws_id = manager._workspace_storage_id(folder)
+    assert not (manager._data_dir / "User" / "workspaceStorage" / ws_id).exists()
+
+
+def test_find_empty_window_state_db_skips_symlinked_dirs(tmp_data_dir, tmp_path):
+    manager = InstanceManager()
+    outside = tmp_path / "outside"
+    _make_vscdb(outside / "state.vscdb", "evil")
+    root = manager._data_dir / "User" / "workspaceStorage"
+    root.mkdir(parents=True)
+    (root / "999").symlink_to(outside)
+
+    assert manager._find_empty_window_state_db() is None
+
+
+def test_seed_workspace_layout_clones_empty_window_state(tmp_data_dir, tmp_path):
+    manager = InstanceManager()
+    _make_empty_window_storage(manager, value="arranged-panes")
+    folder = (tmp_path / "proj").resolve()
+    folder.mkdir()
+
+    manager._seed_workspace_layout(folder)
+
+    ws_id = manager._workspace_storage_id(folder)
+    dest = manager._data_dir / "User" / "workspaceStorage" / ws_id
+    assert _read_vscdb(dest / "state.vscdb") == "arranged-panes"
+    assert json.loads((dest / "workspace.json").read_text()) == {"folder": folder.as_uri()}
+
+
+def test_seed_workspace_layout_skips_when_dest_exists(tmp_data_dir, tmp_path):
+    """D6: an already-seeded (or previously opened) folder keeps its state."""
+    manager = InstanceManager()
+    _make_empty_window_storage(manager, value="new-layout")
+    folder = (tmp_path / "proj").resolve()
+    folder.mkdir()
+    ws_id = manager._workspace_storage_id(folder)
+    existing = manager._data_dir / "User" / "workspaceStorage" / ws_id
+    _make_vscdb(existing / "state.vscdb", "pre-existing")
+
+    manager._seed_workspace_layout(folder)
+
+    assert _read_vscdb(existing / "state.vscdb") == "pre-existing"
+    assert not (existing / "workspace.json").exists()
+
+
+def test_seed_workspace_layout_noop_without_empty_window_source(tmp_data_dir, tmp_path):
+    manager = InstanceManager()
+    folder = (tmp_path / "proj").resolve()
+    folder.mkdir()
+
+    manager._seed_workspace_layout(folder)
+
+    ws_id = manager._workspace_storage_id(folder)
+    assert not (manager._data_dir / "User" / "workspaceStorage" / ws_id).exists()
+
+
+def test_seed_workspace_layout_ignores_folder_hash_dirs_as_source(tmp_data_dir, tmp_path):
+    """Dirs with workspace.json belong to real folders, never the seed source."""
+    manager = InstanceManager()
+    src_dir = manager._data_dir / "User" / "workspaceStorage" / "aabbcc"
+    _make_vscdb(src_dir / "state.vscdb", "other-folder")
+    (src_dir / "workspace.json").write_text('{"folder": "file:///elsewhere"}')
+    folder = (tmp_path / "proj").resolve()
+    folder.mkdir()
+
+    manager._seed_workspace_layout(folder)
+
+    ws_id = manager._workspace_storage_id(folder)
+    assert not (manager._data_dir / "User" / "workspaceStorage" / ws_id).exists()
+
+
+def test_seed_workspace_layout_picks_most_recent_empty_window_dir(tmp_data_dir, tmp_path):
+    manager = InstanceManager()
+    old = _make_empty_window_storage(manager, name="111", value="old")
+    new = _make_empty_window_storage(manager, name="222", value="new")
+    os.utime(old, (1000, 1000))
+    os.utime(new, (2000, 2000))
+    folder = (tmp_path / "proj").resolve()
+    folder.mkdir()
+
+    manager._seed_workspace_layout(folder)
+
+    ws_id = manager._workspace_storage_id(folder)
+    dest = manager._data_dir / "User" / "workspaceStorage" / ws_id
+    assert _read_vscdb(dest / "state.vscdb") == "new"
+
+
+def test_seed_workspace_layout_best_effort_on_error(tmp_data_dir, tmp_path, monkeypatch, caplog):
+    manager = InstanceManager()
+    _make_empty_window_storage(manager)
+    folder = (tmp_path / "proj").resolve()
+    folder.mkdir()
+
+    def _boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(manager, "_backup_sqlite_file", _boom)
+    with caplog.at_level("WARNING"):
+        manager._seed_workspace_layout(folder)  # must not raise
+
+    assert any("layout seed" in record.message.lower() for record in caplog.records)
+
+
+def test_seed_workspace_layout_no_half_seeded_dir_when_backup_fails(
+    tmp_data_dir, tmp_path, monkeypatch
+):
+    """A dest dir without state.vscdb must not survive — it would trip the D6
+    exists-check and block future seed attempts."""
+    manager = InstanceManager()
+    _make_empty_window_storage(manager)
+    folder = (tmp_path / "proj").resolve()
+    folder.mkdir()
+
+    def _silent_fail(src: Path, dst: Path) -> None:
+        dst.parent.mkdir(parents=True, exist_ok=True)  # dir created, no db written
+
+    monkeypatch.setattr(manager, "_backup_sqlite_file", _silent_fail)
+    manager._seed_workspace_layout(folder)
+
+    ws_id = manager._workspace_storage_id(folder)
+    assert not (manager._data_dir / "User" / "workspaceStorage" / ws_id).exists()
+
+
+async def test_ensure_ready_seeds_workspace_layout_on_spawn(fake_spawn, tmp_data_dir, tmp_path):
+    manager = InstanceManager()
+    _make_empty_window_storage(manager, value="spawn-layout")
+    folder = (tmp_path / "proj").resolve()
+    folder.mkdir()
+
+    async def connect_soon():
+        await asyncio.sleep(0)
+        manager.mark_connected()
+
+    task = asyncio.create_task(connect_soon())
+    await manager.ensure_ready(str(folder), port=4321)
+    await task
+
+    ws_id = manager._workspace_storage_id(folder)
+    dest = manager._data_dir / "User" / "workspaceStorage" / ws_id
+    assert _read_vscdb(dest / "state.vscdb") == "spawn-layout"
+
+
+async def test_ensure_ready_seeds_workspace_layout_on_reuse(fake_spawn, tmp_data_dir, tmp_path):
+    """Every --reuse-window folder switch seeds the incoming folder (D5/D6)."""
+    manager = InstanceManager()
+    manager._alive = True
+    manager._open_root = (tmp_path / "other").resolve()
+    manager._connected.set()
+    _make_empty_window_storage(manager, value="reuse-layout")
+    folder = (tmp_path / "proj").resolve()
+    folder.mkdir()
+
+    async def connect_soon():
+        await asyncio.sleep(0)
+        manager.mark_connected()
+
+    task = asyncio.create_task(connect_soon())
+    await manager.ensure_ready(str(folder), port=4321)
+    await task
+
+    ws_id = manager._workspace_storage_id(folder)
+    dest = manager._data_dir / "User" / "workspaceStorage" / ws_id
+    assert _read_vscdb(dest / "state.vscdb") == "reuse-layout"
+    args, _ = fake_spawn[0]
+    assert "--reuse-window" in args
+
+
+async def test_ensure_ready_sub_workspace_shortcut_does_not_seed(fake_spawn, tmp_data_dir, tmp_path):
+    """No window reload on the ADR-0073 shortcut, so no seed either."""
+    repo = tmp_path / "repo"
+    sub = repo / "src"
+    repo.mkdir()
+    sub.mkdir()
+    manager = InstanceManager()
+    manager._alive = True
+    manager._open_root = repo.resolve()
+    manager._connected.set()
+    _make_empty_window_storage(manager)
+
+    await manager.ensure_ready(str(sub.resolve()), port=4321)
+
+    ws_id = manager._workspace_storage_id(sub.resolve())
+    assert not (manager._data_dir / "User" / "workspaceStorage" / ws_id).exists()
+    assert fake_spawn == []
 
 
 def test_copy_template_profile_best_effort_on_unexpected_error(tmp_data_dir, monkeypatch, caplog):
