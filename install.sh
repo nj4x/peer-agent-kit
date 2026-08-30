@@ -24,16 +24,51 @@ SKILL_PATH="$CLAUDE_DIR/skills/peer-agent/SKILL.md"
 SKILL_SOURCE="$KIT_DIR/skills/peer-agent"
 EXTENSION_DIR="$KIT_DIR/extension"
 
-if [ "${1:-}" = "--vscode-config" ]; then
-  if command -v code >/dev/null 2>&1; then
-    code --user-data-dir "$HOME/.vscode-agent-bridge/data" >/dev/null 2>&1 &
-    disown 2>/dev/null || true
-    echo "opened VS Code for template profile setup — configure it, then close the window"
-    exit 0
-  else
-    echo "error: 'code' CLI not found" >&2
+if [ "${1:-}" = "--vscode" ]; then
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    if command -v brew >/dev/null 2>&1; then
+      echo "node/npm not found — installing via Homebrew..."
+      brew install node || { echo "error: brew install node failed" >&2; exit 1; }
+    else
+      echo "error: node/npm not found and Homebrew unavailable — install Node.js first: https://nodejs.org" >&2
+      exit 1
+    fi
+  fi
+
+  if ! command -v code >/dev/null 2>&1; then
+    VSCODE_APP_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin"
+    if [ -d "$VSCODE_APP_BIN" ]; then
+      echo "error: 'code' CLI not in PATH. Add it to your shell profile:" >&2
+      echo "  export PATH=\"$VSCODE_APP_BIN:\$PATH\"" >&2
+    else
+      echo "error: VS Code not found — install it first: https://code.visualstudio.com" >&2
+    fi
     exit 1
   fi
+
+  echo "building VS Code extension..."
+  cd "$EXTENSION_DIR"
+  if npm ci --prefer-offline 2>/dev/null; then
+    npm run compile 2>/dev/null || true
+    VSCODE_EXT_DIR="$HOME/.vscode/extensions"
+    if [ -d "$VSCODE_EXT_DIR" ]; then
+      if npm run install-dev 2>/dev/null; then
+        echo "extension installed: $VSCODE_EXT_DIR"
+      else
+        echo "warning: extension install-dev failed" >&2
+      fi
+    else
+      echo "warning: $VSCODE_EXT_DIR not found — skipping extension install" >&2
+    fi
+  else
+    echo "warning: npm ci failed — skipping extension build" >&2
+  fi
+  cd "$KIT_DIR"
+
+  code --user-data-dir "$HOME/.vscode-agent-bridge/data" --disable-extension nj4x.vscode-agent-bridge >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  echo "opened VS Code for template profile setup — configure it, then close the window"
+  exit 0
 fi
 
 INSTALL_SKILL=0
@@ -271,7 +306,7 @@ if [ ! -f "$TEMPLATE_USER_SETTINGS" ]; then
       case "$answer" in
         y|Y|yes|YES)
           if command -v code >/dev/null 2>&1; then
-            code --user-data-dir "$HOME/.vscode-agent-bridge/data" >/dev/null 2>&1 &
+            code --user-data-dir "$HOME/.vscode-agent-bridge/data" --disable-extension nj4x.vscode-agent-bridge >/dev/null 2>&1 &
             disown 2>/dev/null || true
             echo "opened VS Code for one-time profile setup — configure it, then close the window"
           else
@@ -279,7 +314,7 @@ if [ ! -f "$TEMPLATE_USER_SETTINGS" ]; then
           fi
           ;;
         *)
-          echo "skipping template profile setup — run later: code --user-data-dir $HOME/.vscode-agent-bridge/data"
+          echo "skipping template profile setup — run later: ./install.sh --vscode"
           ;;
       esac
     fi
