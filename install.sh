@@ -174,6 +174,18 @@ if [ -f "$MCP_CONFIG" ]; then
   cp "$MCP_CONFIG" "$BACKUP_DIR/claude.json.bak"
   MCP_BACKUP_JSON="\"$BACKUP_DIR/claude.json.bak\""
 fi
+
+# Capture prior mcpServers["vscode-agent-bridge"] value before patching
+MCP_PRIOR_ENTRY=$(node -e "
+  try {
+    const fs = require('fs');
+    const config = JSON.parse(fs.readFileSync('$MCP_CONFIG', 'utf8'));
+    const entry = config.mcpServers?.['vscode-agent-bridge'];
+    console.log(entry ? JSON.stringify(entry) : 'null');
+  } catch (e) {
+    console.log('null');
+  }
+")
 node "$KIT_DIR/lib/mcp-patch.js" "$MCP_CONFIG" "$KIT_DIR"
 
 cp "$KIT_DIR"/hooks/*.js "$KIT_HOME/hooks/"
@@ -215,6 +227,7 @@ cat > "$KIT_HOME/manifest.json" <<JSON
   "settingsBackup": "$BACKUP_DIR/settings.json.bak",
   "statuslineBackup": $STATUSLINE_BACKUP_JSON,
   "mcpConfigBackup": $MCP_BACKUP_JSON,
+  "mcpPriorEntry": $MCP_PRIOR_ENTRY,
   "pluginRoot": "$PLUGIN_ROOT",
   "skillInstalledByKit": $SKILL_INSTALLED_BY_KIT,
   "skillBackup": $SKILL_BACKUP_JSON

@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # peer-agent-kit uninstaller.
 #
-# Restores settings.json and statusline.sh from the exact backups install.sh
-# made, then removes ~/.peer-agent-kit. Byte-exact restore, not a surgical diff —
-# simpler and safer than trying to reverse-parse what was injected.
+# Restores settings.json and statusline.sh byte-exact from the backups
+# install.sh made. ~/.claude.json is Claude Code's mutable state store, so it
+# is restored surgically instead: only the mcpServers.vscode-agent-bridge
+# entry is reverted (lib/mcp-unpatch.js), the rest of the live file is kept.
+# Then removes ~/.peer-agent-kit.
 set -euo pipefail
 
+KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIT_HOME="$HOME/.peer-agent-kit"
 MANIFEST="$KIT_HOME/manifest.json"
 
@@ -28,7 +31,6 @@ fi
 CLAUDE_DIR="$(node -e "console.log(JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')).claudeDir)")"
 SETTINGS_BACKUP="$(node -e "console.log(JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')).settingsBackup)")"
 STATUSLINE_BACKUP="$(node -e "const m=JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')); console.log(m.statuslineBackup || '')")"
-MCP_CONFIG_BACKUP="$(node -e "const m=JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')); console.log(m.mcpConfigBackup || '')")"
 SKILL_INSTALLED_BY_KIT="$(node -e "const m=JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')); console.log(m.skillInstalledByKit === true ? 'true' : 'false')")"
 SKILL_BACKUP="$(node -e "const m=JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')); console.log(m.skillBackup || '')")"
 
@@ -52,19 +54,8 @@ if [ -n "$STATUSLINE_BACKUP" ]; then
   fi
 fi
 
-# Restore MCP config from backup if it exists
-if [ -n "$MCP_CONFIG_BACKUP" ]; then
-  if [ -f "$MCP_CONFIG_BACKUP" ]; then
-    cp "$MCP_CONFIG_BACKUP" "$MCP_CONFIG"
-    echo "restored: $MCP_CONFIG"
-  else
-    echo "warning: MCP config backup recorded but missing at $MCP_CONFIG_BACKUP — left $MCP_CONFIG untouched" >&2
-  fi
-elif [ -f "$MCP_CONFIG" ]; then
-  # No backup means the file didn't exist before; remove the entire file if created by us
-  rm "$MCP_CONFIG"
-  echo "removed: $MCP_CONFIG (created during install)"
-fi
+# Restore MCP config surgically using mcp-unpatch.js
+node "$KIT_DIR/lib/mcp-unpatch.js" "$MCP_CONFIG" "$MANIFEST"
 
 # Remove VS Code extension symlink if installed
 VSCODE_EXT_DIR="$HOME/.vscode/extensions"
