@@ -8,7 +8,7 @@
 #   PEER_AGENT_KIT_GIT_REPO   — Git repo URL (default: https://github.com/nj4x/peer-agent-kit.git)
 #   PEER_AGENT_KIT_INSTALL_DIR — Installation directory (default: $HOME/.local/share/peer-agent-kit)
 #
-# All arguments are forwarded to install.sh (e.g., --vscode, --install-skill).
+# All arguments are forwarded to install.sh (e.g., --vscode, --no-install-skill).
 set -euo pipefail
 
 REPO_URL="${PEER_AGENT_KIT_GIT_REPO:-https://github.com/nj4x/peer-agent-kit.git}"

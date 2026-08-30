@@ -8,9 +8,9 @@
 # exactly (byte-for-byte for settings/statusline, by removing for MCP/extension).
 #
 # The peer-agent skill ships with this kit (skills/peer-agent/); if not yet
-# present at $CLAUDE_CONFIG_DIR/skills/peer-agent, the installer copies
-# it in — with an interactive prompt, or non-interactively when
-# PEER_AGENT_KIT_INSTALL_SKILL=1 or --install-skill is passed.
+# present at $CLAUDE_CONFIG_DIR/skills/peer-agent, the installer copies it
+# in automatically. Pass --no-install-skill (or PEER_AGENT_KIT_INSTALL_SKILL=0)
+# to skip and manage it yourself.
 set -euo pipefail
 
 KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,9 +82,9 @@ if [ "${1:-}" = "--vscode" ]; then
   exit 0
 fi
 
-INSTALL_SKILL=0
-[ "${1:-}" = "--install-skill" ] && INSTALL_SKILL=1
-[ "${PEER_AGENT_KIT_INSTALL_SKILL:-}" = "1" ] && INSTALL_SKILL=1
+INSTALL_SKILL=1
+[ "${1:-}" = "--no-install-skill" ] && INSTALL_SKILL=0
+[ "${PEER_AGENT_KIT_INSTALL_SKILL:-}" = "0" ] && INSTALL_SKILL=0
 
 # Paths flow unescaped into manifest.json heredocs and node -e strings; a
 # quote or backslash in one would corrupt the manifest and break uninstall.
@@ -99,7 +99,7 @@ skill_missing_abort() {
   echo "error: peer-agent skill not found at $SKILL_PATH" >&2
   echo "peer-agent-kit only wires up hooks for it — install the skill first:" >&2
   echo "  ln -s $SKILL_SOURCE $CLAUDE_DIR/skills/peer-agent" >&2
-  echo "or re-run with --install-skill (or PEER_AGENT_KIT_INSTALL_SKILL=1) to let this installer do it." >&2
+  echo "or drop --no-install-skill to let this installer do it automatically." >&2
   exit 1
 }
 

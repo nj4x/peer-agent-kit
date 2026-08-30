@@ -12,10 +12,10 @@ One-liner installation (requires `git` and `curl`):
 curl -fsSL https://raw.githubusercontent.com/nj4x/peer-agent-kit/main/bootstrap.sh | bash
 ```
 
-With options:
+The `peer-agent` skill is installed automatically. To skip that and manage it yourself:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nj4x/peer-agent-kit/main/bootstrap.sh | bash -s -- --install-skill
+curl -fsSL https://raw.githubusercontent.com/nj4x/peer-agent-kit/main/bootstrap.sh | bash -s -- --no-install-skill
 ```
 
 Environment overrides:
@@ -25,9 +25,9 @@ Environment overrides:
 ## Manual Install
 
 ```bash
-./install.sh                # installs kit, registers MCP server, builds and symlinks extension
-./install.sh --no-extension # installs kit and MCP server, skips extension install
-./install.sh --install-skill # also installs the peer-agent skill
+./install.sh                    # installs kit, registers MCP server, builds and symlinks extension, installs peer-agent skill
+./install.sh --no-extension     # skips extension install
+./install.sh --no-install-skill # skips the peer-agent skill install (bring your own)
 ```
 
 To revert:
