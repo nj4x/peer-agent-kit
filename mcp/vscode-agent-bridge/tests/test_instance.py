@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -430,3 +431,173 @@ async def test_ensure_ready_propagates_symlink_error(fake_spawn, tmp_data_dir, m
         await manager.ensure_ready("/tmp/repo", port=4321)
     assert fake_spawn == []
     assert not manager.alive
+
+
+# --- orphaned data-dir sweep (04-orphan-data-dir-sweep) ---
+
+
+def _bridge_root(tmp_data_dir):
+    return tmp_data_dir / ".vscode-agent-bridge"
+
+
+def _fake_kill(outcomes: dict):
+    def _kill(pid: int, sig: int) -> None:
+        outcome = outcomes.get(pid, ProcessLookupError)
+        if outcome is None:
+            return  # alive
+        raise outcome(f"fake os.kill for pid {pid}")
+
+    return _kill
+
+
+def test_sweep_removes_dead_pid_dirs(tmp_data_dir, monkeypatch):
+    root = _bridge_root(tmp_data_dir)
+    dead_dir = root / "data-555"
+    dead_dir.mkdir(parents=True)
+    (dead_dir / "marker.txt").write_text("x")
+
+    monkeypatch.setattr(os, "getpid", lambda: 1000)
+    monkeypatch.setattr(os, "kill", _fake_kill({555: ProcessLookupError}))
+
+    InstanceManager()
+
+    assert not dead_dir.exists()
+
+
+def test_sweep_keeps_live_pid_own_pid_and_canonical_dirs(tmp_data_dir, monkeypatch):
+    root = _bridge_root(tmp_data_dir)
+    live_dir = root / "data-600"
+    live_dir.mkdir(parents=True)
+    canonical_dir = root / "data"
+    canonical_dir.mkdir(parents=True)
+    (canonical_dir / "marker.txt").write_text("keep me")
+
+    monkeypatch.setattr(os, "getpid", lambda: 700)
+    own_dir = root / "data-700"
+    own_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(os, "kill", _fake_kill({600: None}))
+
+    InstanceManager()
+
+    assert live_dir.exists()
+    assert own_dir.exists()
+    assert canonical_dir.exists()
+    assert (canonical_dir / "marker.txt").exists()
+
+
+def test_sweep_skips_non_integer_suffix(tmp_data_dir, monkeypatch):
+    root = _bridge_root(tmp_data_dir)
+    weird_dir = root / "data-abc"
+    weird_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(os, "getpid", lambda: 1000)
+    monkeypatch.setattr(os, "kill", _fake_kill({}))
+
+    InstanceManager()  # must not raise
+
+    assert weird_dir.exists()
+
+
+def test_sweep_oversized_pid_suffix_swept_via_overflow_error(tmp_data_dir, monkeypatch, caplog):
+    root = _bridge_root(tmp_data_dir)
+    oversized_dir = root / "data-9999999999"
+    oversized_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(os, "getpid", lambda: 1000)
+    monkeypatch.setattr(os, "kill", _fake_kill({9999999999: OverflowError}))
+
+    with caplog.at_level("WARNING"):
+        InstanceManager()  # must not raise
+
+    assert not oversized_dir.exists()
+    assert any("9999999999" in record.message for record in caplog.records)
+
+
+def test_sweep_unlinks_symlink_inside_dead_dir_without_following(tmp_data_dir, monkeypatch):
+    root = _bridge_root(tmp_data_dir)
+    surviving = root / "data-800"
+    surviving.mkdir(parents=True)
+    (surviving / "keep.txt").write_text("still here")
+
+    dead_dir = root / "data-555"
+    dead_dir.mkdir(parents=True)
+    link = dead_dir / "linked"
+    link.symlink_to(surviving)
+
+    monkeypatch.setattr(os, "getpid", lambda: 1000)
+    monkeypatch.setattr(os, "kill", _fake_kill({555: ProcessLookupError, 800: None}))
+
+    InstanceManager()
+
+    assert not dead_dir.exists()
+    assert surviving.exists()
+    assert (surviving / "keep.txt").exists()
+
+
+def test_sweep_removal_failure_logged_warning_and_continues(tmp_data_dir, monkeypatch, caplog):
+    root = _bridge_root(tmp_data_dir)
+    dead_a = root / "data-555"
+    dead_a.mkdir(parents=True)
+    dead_b = root / "data-556"
+    dead_b.mkdir(parents=True)
+
+    monkeypatch.setattr(os, "getpid", lambda: 1000)
+    monkeypatch.setattr(os, "kill", _fake_kill({555: ProcessLookupError, 556: ProcessLookupError}))
+
+    real_rmtree = shutil.rmtree
+
+    def _flaky_rmtree(path, *args, **kwargs):
+        if Path(path) == dead_a:
+            raise OSError("permission denied")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", _flaky_rmtree)
+
+    with caplog.at_level("WARNING"):
+        InstanceManager()  # must not raise
+
+    assert dead_a.exists()  # removal failed, left in place
+    assert not dead_b.exists()  # sweep continued past the failure
+    assert any("failed to remove" in record.message for record in caplog.records)
+
+
+async def test_sweep_pid_reuse_own_dir_guard_then_ensure_ready_succeeds(tmp_data_dir, monkeypatch, fake_spawn):
+    root = _bridge_root(tmp_data_dir)
+    reused_pid = 900
+    stale_dir = root / f"data-{reused_pid}"
+    canonical_dir = root / "data" / "User" / "globalStorage" / "saoudrizwan.claude-dev"
+    canonical_dir.mkdir(parents=True)
+    src = stale_dir / "User" / "globalStorage" / "saoudrizwan.claude-dev"
+    src.parent.mkdir(parents=True)
+    src.symlink_to(canonical_dir)
+    settings_path = stale_dir / "User" / "settings.json"
+    settings_path.write_text(json.dumps(SEED_SETTINGS))
+
+    monkeypatch.setattr(bridge.instance, "CANONICAL_CONFIG_DIR", canonical_dir)
+    monkeypatch.setattr(os, "getpid", lambda: reused_pid)
+
+    kill_calls: list[int] = []
+
+    def _kill(pid: int, sig: int) -> None:
+        kill_calls.append(pid)
+        raise ProcessLookupError(f"fake os.kill for pid {pid}")
+
+    # Every PID (including a dead reused one) would report dead if probed.
+    # The own-dir guard must skip the probe entirely for our own pid.
+    monkeypatch.setattr(os, "kill", _kill)
+
+    manager = InstanceManager()
+    assert stale_dir.exists()  # own-dir guard: not swept despite os.kill saying dead
+    assert reused_pid not in kill_calls  # guard skipped the probe, not just the sweep
+
+    async def connect_soon():
+        await asyncio.sleep(0)
+        manager.mark_connected()
+
+    task = asyncio.create_task(connect_soon())
+    await manager.ensure_ready("/tmp/repo", port=4321)
+    await task
+
+    assert manager.alive
+    assert json.loads(settings_path.read_text()) == SEED_SETTINGS

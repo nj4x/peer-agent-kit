@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 from pathlib import Path
 
 from bridge.logsetup import get_logger
@@ -56,6 +57,7 @@ class InstanceManager:
         self._proc: asyncio.subprocess.Process | None = None
         self._pid = os.getpid()
         self._data_dir = Path(os.path.expanduser(f"~/.vscode-agent-bridge/data-{self._pid}"))
+        self._sweep_orphaned_data_dirs()
 
     @property
     def alive(self) -> bool:
@@ -73,6 +75,46 @@ class InstanceManager:
         if self._proc is not None and self._proc.returncode is None:
             self._proc.terminate()
         self._alive = False
+
+    def _sweep_orphaned_data_dirs(self) -> None:
+        """Best-effort removal of dead servers' data-<pid> dirs (ADR-0071).
+
+        Never raises: cleanup is best-effort, not a liveness precondition.
+        """
+        parent = self._data_dir.parent
+        try:
+            entries = list(parent.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.name.startswith("data-"):
+                continue  # excludes the canonical "data" dir (no trailing pid)
+            suffix = entry.name[len("data-") :]
+            try:
+                pid = int(suffix)
+            except ValueError:
+                continue  # non-integer suffix: not a session dir, skip
+            if pid == self._pid:
+                continue  # never sweep our own dir
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                pass  # dead: fall through to sweep
+            except OverflowError as exc:
+                # pid outside pid_t range: treat as dead, but log per ticket's
+                # error policy ("unexpected os.kill exceptions, including OverflowError")
+                logger.warning("orphan data-dir sweep: os.kill(%d) out of range: %s", pid, exc)
+            except PermissionError:
+                continue  # alive under another user: keep
+            except OSError as exc:
+                logger.warning("orphan data-dir sweep: os.kill(%d, %s) failed: %s", pid, entry, exc)
+                continue
+            else:
+                continue  # alive: keep
+            try:
+                shutil.rmtree(entry)
+            except OSError as exc:
+                logger.warning("orphan data-dir sweep: failed to remove %s: %s", entry, exc)
 
     def _create_config_symlink(self) -> None:
         """Symlink this session's globalStorage to canonical cline-sr config (ADR-0072)."""
