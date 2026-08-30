@@ -57,6 +57,7 @@ sequenceDiagram
         participant Bridge as Bridge (Orchestrator)
         participant HookServer as Hook Server (HTTP + WS)
     end
+    Note over MCP: MCP Tools:<br/>- ask_peer_agent<br/>- submit_to_peer_agent<br/>- poll_peer_agent<br/>- close_peer_agent<br/>- get_logs_for_session
     box LightYellow VS Code
         participant Extension as Extension
         participant Cline as cline-sr (Peer Agent)
@@ -117,6 +118,8 @@ sequenceDiagram
     Bridge->>Instance: ensure_ready(workspace, port)
     activate Instance
     alt Instance not alive or different workspace
+        Instance->>Instance: _copy_template_profile() + _seed_settings() + _create_config_symlink()
+        Instance->>Instance: _seed_workspace_layout(folder) if unseen
         Instance->>Instance: spawn code --user-data-dir workspace
         Instance->>Extension: WebSocket connect /ws
         activate Extension
@@ -129,7 +132,14 @@ sequenceDiagram
     end
     Instance-->>Bridge: ready
     deactivate Instance
-    Bridge->>HookServer: dispatch(question)
+    Bridge->>Bridge: _prepare_dispatch_prompt(record)
+    alt encoded length <= threshold (inline dispatch)
+        Bridge-->>Bridge: return question inline
+    else encoded length > threshold (brief file offload)
+        Bridge->>Bridge: write brief to ~/.vscode-agent-bridge/briefs/brief-<id>.md
+        Bridge-->>Bridge: return pointer prompt
+    end
+    Bridge->>HookServer: dispatch(prompt)
     HookServer->>Extension: WS send {type:submit, prompt}
     Extension->>Extension: invoke URI handler
     Extension->>Cline: vscode://cline-sr.cline-sr/task?prompt=...
@@ -284,9 +294,29 @@ sequenceDiagram
     deactivate Queue
     Bridge->>Instance: ensure_ready(workspace, port)
     activate Instance
+    alt Instance not alive or different workspace
+        Instance->>Instance: _copy_template_profile() + _seed_settings() + _create_config_symlink()
+        Instance->>Instance: _seed_workspace_layout(folder) if unseen
+        Instance->>Instance: spawn code --user-data-dir workspace
+        Instance->>Extension: WebSocket connect /ws
+        activate Extension
+        Extension->>HookServer: WS open (liveness signal)
+        HookServer->>Instance: mark_connected()
+        Extension-->>Instance: connected
+        deactivate Extension
+    else Instance already ready
+        Instance-->>Bridge: ready (reuse)
+    end
     Instance-->>Bridge: ready
     deactivate Instance
-    Bridge->>HookServer: dispatch(question)
+    Bridge->>Bridge: _prepare_dispatch_prompt(record)
+    alt encoded length <= threshold (inline dispatch)
+        Bridge-->>Bridge: return question inline
+    else encoded length > threshold (brief file offload)
+        Bridge->>Bridge: write brief to ~/.vscode-agent-bridge/briefs/brief-<id>.md
+        Bridge-->>Bridge: return pointer prompt
+    end
+    Bridge->>HookServer: dispatch(prompt)
     HookServer->>Extension: WS send {type:submit, prompt}
     Extension->>Cline: vscode://cline-sr.cline-sr/task?prompt=...
     activate Cline
