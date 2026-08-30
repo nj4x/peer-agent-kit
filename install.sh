@@ -240,6 +240,40 @@ if [ "$SKILL_NEEDS_PATCH" = "1" ]; then
   fi
 fi
 
+# --- Template profile bootstrap (ADR-0076, SRS-PAK-007) ---------------------
+# `User/settings.json` under the canonical data dir is the configured-marker
+# (not the parent dir, which ADR-0072's symlink bootstrap already creates as
+# a side effect). One-time window: theme/keybindings/pane layout set here
+# propagate into every future delegated session (bridge/instance.py copy).
+TEMPLATE_USER_SETTINGS="$HOME/.vscode-agent-bridge/data/User/settings.json"
+if [ ! -f "$TEMPLATE_USER_SETTINGS" ]; then
+  if [ -t 0 ]; then
+    echo
+    echo "Template profile not configured yet."
+    echo "This opens a one-time VS Code window where you can set your theme, keybindings,"
+    echo "and pane layout — every future delegated session inherits it (no project folder"
+    echo "will be opened; this window is for profile setup only)."
+    printf 'Open it now? (y/N) '
+    if read -r answer; then
+      case "$answer" in
+        y|Y|yes|YES)
+          if command -v code >/dev/null 2>&1; then
+            code --user-data-dir "$HOME/.vscode-agent-bridge/data" >/dev/null 2>&1 &
+            disown 2>/dev/null || true
+            echo "opened VS Code for one-time profile setup — configure it, then close the window"
+          else
+            echo "warning: 'code' CLI not found — skipping template profile setup" >&2
+          fi
+          ;;
+        *)
+          echo "skipping template profile setup — run later: code --user-data-dir $HOME/.vscode-agent-bridge/data"
+          ;;
+      esac
+    fi
+  fi
+  # non-TTY (CI/scripted install): skip silently
+fi
+
 echo
 echo "peer-agent-kit installed to $KIT_HOME"
 echo "Restart Claude Code for the hooks to take effect."

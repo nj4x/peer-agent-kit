@@ -21,3 +21,6 @@ When a delegated task stops progressing because the peer agent needs human input
 
 **FS-PAK-004 — Low-friction repeated delegation**
 Delegating successive tasks within the same project tree (including subdirectories of an already-open workspace) shall not incur avoidable instance restarts or loss of peer-agent working context.
+
+**FS-PAK-005 — Unattended instance readiness with the user's editor profile**
+When a session spawns its dedicated peer-agent window, the window shall become ready for delegated work without requiring interactive first-run responses from the user, and shall reflect the user's once-configured editor preferences (theme, pane layout, keybindings) without per-session reconfiguration.

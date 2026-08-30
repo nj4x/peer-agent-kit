@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
 from pathlib import Path
 
 from bridge.logsetup import get_logger
@@ -28,6 +29,14 @@ CANONICAL_CONFIG_DIR = Path(
     os.path.expanduser("~/.vscode-agent-bridge/data/User/globalStorage/saoudrizwan.claude-dev")
 )
 
+# User's once-configured canonical VS Code profile, copied into every fresh
+# session data-dir on spawn (ADR-0076). `settings.json` existing under here
+# is the configured-marker (see install.sh).
+TEMPLATE_USER_DIR = Path(os.path.expanduser("~/.vscode-agent-bridge/data/User"))
+
+# ADR-0072's symlink target — must never be clobbered by the template copy.
+_TEMPLATE_COPY_EXCLUDED_GLOBAL_STORAGE = "saoudrizwan.claude-dev"
+
 # Suppress every first-run interactive prompt so a fresh dedicated window
 # needs no human click before cline-sr can run (task/77).
 SEED_SETTINGS = {
@@ -40,6 +49,8 @@ SEED_SETTINGS = {
     "telemetry.telemetryLevel": "off",
     "settingsSync.enabled": False,
     "github.gitAuthentication": False,
+    "extensions.confirmedUriHandlerExtensionIds": ["cline-sr.cline-sr"],
+    "github.copilot.enable": {"*": False},
 }
 
 
@@ -135,6 +146,101 @@ class InstanceManager:
         src.parent.mkdir(parents=True, exist_ok=True)
         src.symlink_to(tgt)
 
+    def _copy_template_profile(self) -> None:
+        """Copy the user's configured profile into this session's data-dir (ADR-0076).
+
+        Enhancement over the seed-only path, not a prerequisite: any failure
+        degrades to today's functional baseline rather than failing spawn.
+        """
+        try:
+            self._copy_template_profile_unsafe()
+        except Exception as exc:  # noqa: BLE001 - best-effort per ADR-0076 Failure policy
+            logger.warning("template profile copy failed, continuing seed-only: %s", exc)
+
+    def _copy_template_profile_unsafe(self) -> None:
+        if not (TEMPLATE_USER_DIR / "settings.json").exists():
+            return  # template unconfigured: degrade to seed-only path
+
+        dest_user = self._data_dir / "User"
+
+        for name in ("settings.json", "keybindings.json", "snippets"):
+            src = TEMPLATE_USER_DIR / name
+            if src.exists():
+                self._copy_template_entry(src, dest_user / name)
+
+        src_workspace_storage = TEMPLATE_USER_DIR / "workspaceStorage"
+        if src_workspace_storage.is_dir():
+            for hash_dir in src_workspace_storage.iterdir():
+                self._copy_template_entry(hash_dir, dest_user / "workspaceStorage" / hash_dir.name)
+
+        src_global_storage = TEMPLATE_USER_DIR / "globalStorage"
+        if src_global_storage.is_dir():
+            for entry in src_global_storage.iterdir():
+                if entry.name == _TEMPLATE_COPY_EXCLUDED_GLOBAL_STORAGE:
+                    continue  # stays an ADR-0072 symlink, never overwritten
+                try:
+                    if entry.resolve() == CANONICAL_CONFIG_DIR.resolve():
+                        continue  # reject symlinks resolving to canonical-config
+                except (OSError, RuntimeError):
+                    pass  # unresolvable: let copy error handler catch it
+                self._copy_template_entry(entry, dest_user / "globalStorage" / entry.name)
+
+        # User/History/ is intentionally skipped: session-specific.
+
+    def _copy_template_entry(self, src: Path, dst: Path) -> None:
+        if src.is_symlink():
+            return  # skip symlinks; only copy real files and follow dirs (not symlink-to-dir)
+        if src.is_dir():
+            dst.mkdir(parents=True, exist_ok=True)
+            for child in src.iterdir():
+                self._copy_template_entry(child, dst / child.name)
+        elif src.suffix == ".vscdb":
+            self._backup_sqlite_file(src, dst)
+        elif src.name.startswith(src.stem + ".vscdb"):
+            return  # skip .vscdb sidecars (-wal, -shm, -journal); only snapshot via backup API
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+    def _backup_sqlite_file(self, src: Path, dst: Path) -> None:
+        """Snapshot a `.vscdb` file via SQLite's online backup API.
+
+        A raw copy risks torn pages; the online backup API produces a
+        transactionally consistent snapshot even if the template window is
+        live and mid-write. Rollback-journal mode means a writer's EXCLUSIVE
+        lock can still raise OperationalError — caught here, per-file, so one
+        locked file doesn't abort the rest of the copy (ADR-0076).
+        """
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        src_conn = None
+        dst_conn = None
+        try:
+            src_conn = sqlite3.connect(str(src))
+            dst_conn = sqlite3.connect(str(dst))
+            src_conn.backup(dst_conn)
+        except sqlite3.Error as exc:
+            logger.warning("template profile copy: skipping %s (sqlite backup failed): %s", src, exc)
+            try:
+                if dst_conn is not None:
+                    dst_conn.close()
+                    dst_conn = None
+                dst.unlink(missing_ok=True)  # no partial/empty snapshot left behind
+            except Exception as cleanup_exc:  # noqa: BLE001
+                logger.warning(
+                    "template profile copy: cleanup failed for %s, continuing: %s", dst, cleanup_exc
+                )
+        finally:
+            if dst_conn is not None:
+                try:
+                    dst_conn.close()
+                except Exception:  # noqa: BLE001
+                    pass  # best effort, don't interrupt finally chain
+            if src_conn is not None:
+                try:
+                    src_conn.close()
+                except Exception:  # noqa: BLE001
+                    pass  # best effort, don't interrupt finally chain
+
     def _seed_settings(self) -> None:
         settings_path = self._data_dir / "User" / "settings.json"
         settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -177,6 +283,7 @@ class InstanceManager:
 
         if not self._alive:
             self._create_config_symlink()
+            self._copy_template_profile()
             self._seed_settings()
         env = {**os.environ, "BRIDGE_PORT": str(port)}
         self._proc = await asyncio.create_subprocess_exec(*args, env=env)

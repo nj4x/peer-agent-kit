@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ def tmp_data_dir(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os.path, "expanduser", _fake_expanduser)
     monkeypatch.setattr(bridge.instance, "CANONICAL_CONFIG_DIR", tmp_path / "canonical")
+    monkeypatch.setattr(bridge.instance, "TEMPLATE_USER_DIR", tmp_path / "template" / "User")
     return tmp_path
 
 
@@ -210,6 +212,12 @@ async def test_ensure_ready_times_out_if_extension_never_connects(fake_spawn, mo
     with pytest.raises(InstanceUnreachable):
         await manager.ensure_ready("/tmp/repo", port=4321)
     assert not manager.alive
+
+
+def test_seed_settings_includes_uri_handler_trust_and_copilot_disable_keys():
+    """Regression guard against accidental key drops (ADR-0076, SRS-PAK-007)."""
+    assert SEED_SETTINGS["extensions.confirmedUriHandlerExtensionIds"] == ["cline-sr.cline-sr"]
+    assert SEED_SETTINGS["github.copilot.enable"] == {"*": False}
 
 
 def test_seed_settings_creates_file_with_defaults(tmp_data_dir):
@@ -601,3 +609,182 @@ async def test_sweep_pid_reuse_own_dir_guard_then_ensure_ready_succeeds(tmp_data
 
     assert manager.alive
     assert json.loads(settings_path.read_text()) == SEED_SETTINGS
+
+
+# --- template-profile bootstrap (ADR-0076) ---
+
+
+def _template_dir() -> Path:
+    return bridge.instance.TEMPLATE_USER_DIR
+
+
+def _dest_user_dir(manager: InstanceManager) -> Path:
+    return manager._data_dir / "User"
+
+
+def _make_vscdb(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE kv (k TEXT, v TEXT)")
+    conn.execute("INSERT INTO kv VALUES ('key', ?)", (value,))
+    conn.commit()
+    conn.close()
+
+
+def _read_vscdb(path: Path) -> str:
+    conn = sqlite3.connect(str(path))
+    row = conn.execute("SELECT v FROM kv WHERE k = 'key'").fetchone()
+    conn.close()
+    return row[0]
+
+
+def test_copy_template_profile_noop_when_template_unconfigured(tmp_data_dir):
+    manager = InstanceManager()
+    manager._copy_template_profile()
+    assert not _dest_user_dir(manager).exists()
+
+
+def test_copy_template_profile_copies_settings_keybindings_snippets(tmp_data_dir):
+    template = _template_dir()
+    template.mkdir(parents=True)
+    (template / "settings.json").write_text('{"editor.fontSize": 14}')
+    (template / "keybindings.json").write_text("[]")
+    (template / "snippets").mkdir()
+    (template / "snippets" / "python.json").write_text("{}")
+
+    manager = InstanceManager()
+    manager._copy_template_profile()
+
+    dest = _dest_user_dir(manager)
+    assert dest.joinpath("settings.json").read_text() == '{"editor.fontSize": 14}'
+    assert dest.joinpath("keybindings.json").read_text() == "[]"
+    assert dest.joinpath("snippets", "python.json").read_text() == "{}"
+
+
+def test_copy_template_profile_copies_workspace_storage_vscdb_via_backup(tmp_data_dir):
+    template = _template_dir()
+    template.mkdir(parents=True)
+    (template / "settings.json").write_text("{}")
+    _make_vscdb(template / "workspaceStorage" / "abc123" / "state.vscdb", "geometry")
+
+    manager = InstanceManager()
+    manager._copy_template_profile()
+
+    dest_db = _dest_user_dir(manager) / "workspaceStorage" / "abc123" / "state.vscdb"
+    assert dest_db.exists()
+    assert _read_vscdb(dest_db) == "geometry"
+
+
+def test_copy_template_profile_excludes_cline_sr_global_storage_symlink_target(tmp_data_dir):
+    template = _template_dir()
+    template.mkdir(parents=True)
+    (template / "settings.json").write_text("{}")
+    (template / "globalStorage" / "saoudrizwan.claude-dev").mkdir(parents=True)
+    (template / "globalStorage" / "saoudrizwan.claude-dev" / "state.json").write_text("{}")
+    (template / "globalStorage" / "other-ext").mkdir(parents=True)
+    (template / "globalStorage" / "other-ext" / "state.json").write_text('{"k": 1}')
+
+    manager = InstanceManager()
+    manager._copy_template_profile()
+
+    dest_global = _dest_user_dir(manager) / "globalStorage"
+    assert not (dest_global / "saoudrizwan.claude-dev").exists()
+    assert (dest_global / "other-ext" / "state.json").read_text() == '{"k": 1}'
+
+
+def test_copy_template_profile_skips_history(tmp_data_dir):
+    template = _template_dir()
+    template.mkdir(parents=True)
+    (template / "settings.json").write_text("{}")
+    (template / "History" / "entry").mkdir(parents=True)
+
+    manager = InstanceManager()
+    manager._copy_template_profile()
+
+    assert not (_dest_user_dir(manager) / "History").exists()
+
+
+def test_copy_template_profile_vscdb_backup_skips_sidecars(tmp_data_dir):
+    """Verify .vscdb-wal/-shm/-journal sidecars are not copied (ADR-0076)."""
+    template = _template_dir()
+    template.mkdir(parents=True)
+    (template / "settings.json").write_text("{}")
+    _make_vscdb(template / "workspaceStorage" / "ws" / "state.vscdb", "test")
+    (template / "workspaceStorage" / "ws" / "state.vscdb-wal").write_text("sidecar")
+
+    manager = InstanceManager()
+    manager._copy_template_profile()
+
+    dest = _dest_user_dir(manager)
+    assert (dest / "workspaceStorage" / "ws" / "state.vscdb").exists()
+    assert not (dest / "workspaceStorage" / "ws" / "state.vscdb-wal").exists()
+
+
+def test_copy_template_profile_best_effort_on_unexpected_error(tmp_data_dir, monkeypatch, caplog):
+    template = _template_dir()
+    template.mkdir(parents=True)
+    (template / "settings.json").write_text("{}")
+
+    def _boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(shutil, "copy2", _boom)
+
+    manager = InstanceManager()
+    with caplog.at_level("WARNING"):
+        manager._copy_template_profile()  # must not raise
+
+    assert any("template profile" in record.message.lower() for record in caplog.records)
+
+
+async def test_ensure_ready_copies_template_profile_before_seed_settings_on_fresh_spawn(
+    fake_spawn, tmp_data_dir
+):
+    calls: list[str] = []
+    manager = InstanceManager()
+
+    original_copy = manager._copy_template_profile
+    original_seed = manager._seed_settings
+
+    def _copy():
+        calls.append("copy")
+        original_copy()
+
+    def _seed():
+        calls.append("seed")
+        original_seed()
+
+    manager._copy_template_profile = _copy
+    manager._seed_settings = _seed
+
+    async def connect_soon():
+        await asyncio.sleep(0)
+        manager.mark_connected()
+
+    task = asyncio.create_task(connect_soon())
+    await manager.ensure_ready("/tmp/repo", port=4321)
+    await task
+
+    assert calls == ["copy", "seed"]
+
+
+async def test_ensure_ready_skips_copy_template_profile_on_reuse(fake_spawn, tmp_data_dir, monkeypatch):
+    manager = InstanceManager()
+    manager._alive = True
+    manager.workspace = "/tmp/old"
+    manager._connected.set()
+
+    calls: list[str] = []
+    monkeypatch.setattr(manager, "_copy_template_profile", lambda: calls.append("copy"))
+    monkeypatch.setattr(manager, "_create_config_symlink", lambda: calls.append("symlink"))
+    monkeypatch.setattr(manager, "_seed_settings", lambda: calls.append("seed"))
+
+    async def connect_soon():
+        await asyncio.sleep(0)
+        manager.mark_connected()
+
+    task = asyncio.create_task(connect_soon())
+    await manager.ensure_ready("/tmp/new", port=4321)
+    await task
+
+    assert calls == []  # already-wired session: no re-copy on window reuse

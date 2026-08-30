@@ -9,7 +9,7 @@ source-fs: .data/requirements/peer-agent-kit-FS-001.md
 
 System contracts satisfying peer-agent-kit-FS-001. Contracts state observable system behavior (EARS format); realization mechanisms (data-dir layout, symlinks, hook wiring) are recorded in ADRs.
 
-**Source FS**: FS-PAK-001, FS-PAK-002, FS-PAK-003, FS-PAK-004
+**Source FS**: FS-PAK-001, FS-PAK-002, FS-PAK-003, FS-PAK-004, FS-PAK-005
 
 ## Requirements
 
@@ -36,3 +36,7 @@ WHEN the system compares two workspace paths for equality or containment, THE SY
 **SRS-PAK-006 — Waiting-for-input status surfacing** *(Deferred — no realizing ADR)*
 WHEN the peer agent enters a state of waiting for human input on a delegated task, THE SYSTEM SHALL report a status distinguishable from active work to the delegating caller on its next poll.
 *Source FS*: FS-PAK-003
+
+**SRS-PAK-007 — First-run prompt suppression and profile propagation**
+WHEN the system spawns a peer-agent instance with a fresh instance environment, THE SYSTEM SHALL suppress interactive first-run prompts that would block task dispatch, AND SHALL apply the user's previously configured editor profile to the new instance environment when one exists.
+*Source FS*: FS-PAK-005
