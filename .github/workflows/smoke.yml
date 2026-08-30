@@ -1,0 +1,23 @@
+name: Smoke Tests
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 6:00 AM UTC
+  workflow_dispatch:      # Allow manual runs
+
+jobs:
+  test:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install bats-core
+        run: brew install bats-core
+      
+      - name: Install git (for bootstrap tests)
+        run: brew install git
+      
+      - name: Run bats tests
+        run: bats tests/

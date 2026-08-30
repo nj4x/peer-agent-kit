@@ -23,6 +23,17 @@ MCP_CONFIG="${HOME}/.claude.json"
 SKILL_PATH="$CLAUDE_DIR/skills/peer-agent/SKILL.md"
 SKILL_SOURCE="$KIT_DIR/skills/peer-agent"
 EXTENSION_DIR="$KIT_DIR/extension"
+INSTALL_DIR="${PEER_AGENT_KIT_INSTALL_DIR:-$HOME/.local/share/peer-agent-kit}"
+
+# Rollback handler — called on any error after manifest exists
+rollback_on_failure() {
+  echo "[peer-agent-kit] Install failed — rolling back partial changes..." >&2
+  if [ -f "$KIT_HOME/manifest.json" ]; then
+    "$KIT_DIR/uninstall.sh" >&2 || echo "[peer-agent-kit] warning: rollback via uninstall.sh failed — remove $KIT_HOME manually" >&2
+  else
+    rm -rf "$KIT_HOME"
+  fi
+}
 
 if [ "${1:-}" = "--vscode" ]; then
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
@@ -75,6 +86,15 @@ INSTALL_SKILL=0
 [ "${1:-}" = "--install-skill" ] && INSTALL_SKILL=1
 [ "${PEER_AGENT_KIT_INSTALL_SKILL:-}" = "1" ] && INSTALL_SKILL=1
 
+# Paths flow unescaped into manifest.json heredocs and node -e strings; a
+# quote or backslash in one would corrupt the manifest and break uninstall.
+for _pv in "HOME=$HOME" "CLAUDE_DIR=$CLAUDE_DIR"; do
+  case "${_pv#*=}" in
+    *\"*|*\\*) echo "error: ${_pv%%=*} contains a quote or backslash — unsupported installation path: ${_pv#*=}" >&2; exit 1 ;;
+  esac
+done
+unset _pv
+
 skill_missing_abort() {
   echo "error: peer-agent skill not found at $SKILL_PATH" >&2
   echo "peer-agent-kit only wires up hooks for it — install the skill first:" >&2
@@ -83,12 +103,23 @@ skill_missing_abort() {
   exit 1
 }
 
+# A completed prior install blocks reinstall (run uninstall.sh first). An
+# incomplete one (crashed before manifest's completed:true, or before the
+# trap-based rollback existed) is cleaned up automatically so install.sh is
+# always safe to re-run.
 if [ -d "$KIT_HOME" ]; then
-  echo "error: peer-agent-kit already installed at $KIT_HOME. Run uninstall.sh first." >&2
-  exit 1
+  if [ -f "$KIT_HOME/manifest.json" ] && grep -q '"completed": *true' "$KIT_HOME/manifest.json" 2>/dev/null; then
+    echo "error: peer-agent-kit already installed at $KIT_HOME. Run uninstall.sh first." >&2
+    exit 1
+  else
+    echo "[peer-agent-kit] Found incomplete prior install at $KIT_HOME — cleaning up before retry..." >&2
+    rm -rf "$KIT_HOME"
+  fi
 fi
 
 # --- Prerequisites: auto-install what we can, warn about the rest -----------
+
+echo "[peer-agent-kit] Checking prerequisites..."
 
 # node/npm — required for hooks and extension build. Try Homebrew if absent.
 if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
@@ -137,7 +168,7 @@ CLINE_STATE="$HOME/.cline-sr/data/globalState.json"
 if [ -f "$CLINE_STATE" ] && command -v node >/dev/null 2>&1; then
   HOOKS_ENABLED="$(node -e "try{const s=JSON.parse(require('fs').readFileSync('$CLINE_STATE','utf8'));console.log(s.hooksEnabled===false?'false':'true')}catch(e){console.log('true')}")"
   if [ "$HOOKS_ENABLED" = "false" ]; then
-    echo "warning: cline-sr Hooks are disabled — enable Hooks in cline-sr settings or the bridge cannot track tasks" >&2
+    echo "warning: cline-sr Hooks are disabled — enable Hooks in cline-sr settings webview or the bridge cannot track tasks" >&2
   fi
 fi
 
@@ -180,7 +211,7 @@ fi
 PLUGIN_ROOT="$(cd -P "$(dirname "$SKILL_PATH")/../.." && pwd)"
 
 # Build and install extension (skip gracefully if ~/.vscode/extensions/ missing)
-echo "building VS Code extension..."
+echo "[peer-agent-kit] Building VS Code extension..."
 cd "$EXTENSION_DIR"
 if npm ci --prefer-offline 2>/dev/null; then
   npm run compile 2>/dev/null || true
@@ -201,7 +232,7 @@ cd "$KIT_DIR"
 
 # Pre-warm the MCP server environment so the first launch isn't a cold
 # dependency install; uv run (used by the registration) reuses this env.
-echo "setting up MCP server environment..."
+echo "[peer-agent-kit] Setting up MCP server environment..."
 if uv sync --directory "$KIT_DIR/mcp/vscode-agent-bridge" >/dev/null 2>&1; then
   # Smoke check: the server module must import cleanly.
   if uv run --directory "$KIT_DIR/mcp/vscode-agent-bridge" python -c "import server" >/dev/null 2>&1; then
@@ -213,9 +244,31 @@ else
   echo "warning: uv sync failed — the MCP server will install dependencies on first launch" >&2
 fi
 
-# Register MCP server in ~/.claude.json, backing up the original entry if present
-echo "registering vscode-agent-bridge MCP server..."
+# --- Early manifest creation + trap setup ------------------------------------
+echo "[peer-agent-kit] Creating installation directories..."
 mkdir -p "$KIT_HOME/hooks" "$BACKUP_DIR"
+
+# Write initial manifest with placeholder values
+cat > "$KIT_HOME/manifest.json" <<JSON
+{
+  "installedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "claudeDir": "$CLAUDE_DIR",
+  "settingsBackup": null,
+  "statuslineBackup": null,
+  "mcpConfigBackup": null,
+  "mcpPriorEntry": null,
+  "pluginRoot": "$PLUGIN_ROOT",
+  "skillInstalledByKit": $SKILL_INSTALLED_BY_KIT,
+  "skillBackup": null,
+  "completed": false
+}
+JSON
+
+# Enable rollback trap now that manifest exists
+trap 'rollback_on_failure' ERR
+
+# --- Register MCP server in ~/.claude.json, backing up the original entry ---
+echo "[peer-agent-kit] Registering MCP server..."
 
 MCP_BACKUP_JSON="null"
 if [ -f "$MCP_CONFIG" ]; then
@@ -234,13 +287,50 @@ MCP_PRIOR_ENTRY=$(node -e "
     console.log('null');
   }
 ")
+
+# Update manifest with mcpPriorEntry
+cat > "$KIT_HOME/manifest.json" <<JSON
+{
+  "installedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "claudeDir": "$CLAUDE_DIR",
+  "settingsBackup": null,
+  "statuslineBackup": null,
+  "mcpConfigBackup": $MCP_BACKUP_JSON,
+  "mcpPriorEntry": $MCP_PRIOR_ENTRY,
+  "pluginRoot": "$PLUGIN_ROOT",
+  "skillInstalledByKit": $SKILL_INSTALLED_BY_KIT,
+  "skillBackup": null,
+  "completed": false
+}
+JSON
+
 node "$KIT_DIR/lib/mcp-patch.js" "$MCP_CONFIG" "$KIT_DIR"
 
 cp "$KIT_DIR"/hooks/*.js "$KIT_HOME/hooks/"
 
+# --- Patch settings.json ----------------------------------------------------
+echo "[peer-agent-kit] Patching Claude Code settings..."
+
 cp "$SETTINGS" "$BACKUP_DIR/settings.json.bak"
 node "$KIT_DIR/lib/settings-patch.js" "$SETTINGS" "$KIT_HOME/hooks" "$PLUGIN_ROOT"
 
+# Update manifest with settingsBackup
+cat > "$KIT_HOME/manifest.json" <<JSON
+{
+  "installedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "claudeDir": "$CLAUDE_DIR",
+  "settingsBackup": "$BACKUP_DIR/settings.json.bak",
+  "statuslineBackup": null,
+  "mcpConfigBackup": $MCP_BACKUP_JSON,
+  "mcpPriorEntry": $MCP_PRIOR_ENTRY,
+  "pluginRoot": "$PLUGIN_ROOT",
+  "skillInstalledByKit": $SKILL_INSTALLED_BY_KIT,
+  "skillBackup": null,
+  "completed": false
+}
+JSON
+
+# --- Patch statusline.sh ----------------------------------------------------
 STATUSLINE_BACKUP_JSON="null"
 if [ -f "$STATUSLINE" ] && [ ! -L "$STATUSLINE" ]; then
   cp "$STATUSLINE" "$BACKUP_DIR/statusline.sh.bak"
@@ -250,10 +340,26 @@ else
   echo "warning: $STATUSLINE not found (or is a symlink) — skipping statusline badge" >&2
 fi
 
-# Skill frontmatter patch (ADR 0002). Backup first; manifest is written with
-# the skill fields BEFORE the patch attempt (decision 6) so uninstall.sh can
-# always clean up correctly even if the patch fails. Patch failure is
-# non-fatal by design.
+# Update manifest with statuslineBackup
+cat > "$KIT_HOME/manifest.json" <<JSON
+{
+  "installedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "claudeDir": "$CLAUDE_DIR",
+  "settingsBackup": "$BACKUP_DIR/settings.json.bak",
+  "statuslineBackup": $STATUSLINE_BACKUP_JSON,
+  "mcpConfigBackup": $MCP_BACKUP_JSON,
+  "mcpPriorEntry": $MCP_PRIOR_ENTRY,
+  "pluginRoot": "$PLUGIN_ROOT",
+  "skillInstalledByKit": $SKILL_INSTALLED_BY_KIT,
+  "skillBackup": null,
+  "completed": false
+}
+JSON
+
+# --- Skill frontmatter patch (ADR 0002) -------------------------------------
+# Backup first; manifest is written with the skill fields BEFORE the patch
+# attempt (decision 6) so uninstall.sh can always clean up correctly even if
+# the patch fails. Patch failure is non-fatal by design.
 SKILL_BACKUP_JSON="null"
 SKILL_NEEDS_PATCH=1
 if grep -q '^disable-model-invocation:' "$SKILL_PATH" 2>/dev/null; then
@@ -268,6 +374,7 @@ if [ "$SKILL_NEEDS_PATCH" = "1" ]; then
   fi
 fi
 
+# Update manifest with skillBackup before attempting patch
 cat > "$KIT_HOME/manifest.json" <<JSON
 {
   "installedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
@@ -278,7 +385,8 @@ cat > "$KIT_HOME/manifest.json" <<JSON
   "mcpPriorEntry": $MCP_PRIOR_ENTRY,
   "pluginRoot": "$PLUGIN_ROOT",
   "skillInstalledByKit": $SKILL_INSTALLED_BY_KIT,
-  "skillBackup": $SKILL_BACKUP_JSON
+  "skillBackup": $SKILL_BACKUP_JSON,
+  "completed": false
 }
 JSON
 
@@ -322,6 +430,26 @@ if [ ! -f "$TEMPLATE_USER_SETTINGS" ]; then
   # non-TTY (CI/scripted install): skip silently
 fi
 
+# --- Final manifest write (completed: true) ---------------------------------
+cat > "$KIT_HOME/manifest.json" <<JSON
+{
+  "installedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "claudeDir": "$CLAUDE_DIR",
+  "settingsBackup": "$BACKUP_DIR/settings.json.bak",
+  "statuslineBackup": $STATUSLINE_BACKUP_JSON,
+  "mcpConfigBackup": $MCP_BACKUP_JSON,
+  "mcpPriorEntry": $MCP_PRIOR_ENTRY,
+  "pluginRoot": "$PLUGIN_ROOT",
+  "skillInstalledByKit": $SKILL_INSTALLED_BY_KIT,
+  "skillBackup": $SKILL_BACKUP_JSON,
+  "completed": true
+}
+JSON
+
+# Disable rollback trap — installation completed successfully
+trap - ERR
+
 echo
 echo "peer-agent-kit installed to $KIT_HOME"
+echo "To uninstall: $INSTALL_DIR/uninstall.sh"
 echo "Restart Claude Code for the hooks to take effect."

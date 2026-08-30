@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Stub node that handles the specific invocations from install.sh and uninstall.sh
+
+# Check for various invocation patterns
+if [[ "$*" == *"mcpServers"* ]] || [[ "$*" == *"config.mcpServers"* ]]; then
+  echo "null"
+  exit 0
+fi
+
+# For claudeDir extraction from manifest
+if [[ "$*" == *"claudeDir"* ]]; then
+  echo "$CLAUDE_CONFIG_DIR"
+  exit 0
+fi
+
+# For skillInstalledByKit extraction
+if [[ "$*" == *"skillInstalledByKit"* ]]; then
+  echo "false"
+  exit 0
+fi
+
+# For completed field check
+if [[ "$*" == *"completed"* ]]; then
+  echo "true"
+  exit 0
+fi
+
+# Default: succeed silently
+exit 0
