@@ -1,0 +1,61 @@
+# peer-agent-kit
+
+Installer kit that wires the `peer-agent` Claude Code skill and `vscode-agent-bridge` MCP server into an existing Claude Code configuration.
+
+`install.sh` registers the vscode-agent-bridge MCP server in `~/.claude.json`, installs the VS Code extension into `~/.vscode/extensions/`, and injects three hook entries (`SessionStart`, `UserPromptSubmit`) and a statusline badge into the Claude Code configuration. Everything it touches is backed up, so `uninstall.sh` can restore the original configuration exactly.
+
+## Prerequisites
+
+- `node` on `PATH`
+- `~/.vscode/` directory (VS Code must be installed; extension install skipped with a warning if absent)
+
+The `peer-agent` skill and `vscode-agent-bridge` MCP server are bundled; `install.sh` places them in `$CLAUDE_CONFIG_DIR/skills/peer-agent/` and registers the server in `~/.claude.json`.
+
+## Usage
+
+```bash
+./install.sh                # installs kit, registers MCP server, builds and symlinks extension
+./install.sh --no-extension # installs kit and MCP server, skips extension install
+```
+
+To revert:
+
+```bash
+./uninstall.sh
+```
+
+## Per-repository mode
+
+The delegation mode is repo-scoped when the repository root contains a `.claude/` directory: `/peer-agent <mode>` then reads and writes `<repo>/.claude/.peer-agent-mode` (auto-added to `.git/info/exclude`, so it stays local to your clone). Without a repo or `.claude/` directory, the global `~/.claude/.peer-agent-active` file is used. The repo file is also the persisted default for that repo — a new session starts in whatever mode was last set there. Hand-editing the file works too.
+
+## Modes
+
+| Mode | Behavior |
+|------|----------|
+| `off` | No delegation — all work runs locally |
+| `lite` | Delegate only simplest deterministic tasks; LLM designs/plans, peer executes pre-planned work |
+| `full` (default) | LLM designs/plans/critiques; peer executes plans, validates reports, runs straightforward skill-based tasks |
+| `max` | Delegate almost everything (token-economy mode); local: conversation/judgement, mode changes, verification of delegated work |
+
+See [`SKILL.md`](skills/peer-agent/SKILL.md) for per-mode policies and worked examples.
+
+## Layout
+
+- `install.sh` / `uninstall.sh` — entry points
+- `hooks/` — hook scripts injected into Claude Code configuration
+- `lib/` — patch helpers shared by the hooks and installer
+- `skills/peer-agent/` — the peer-agent skill (bundled)
+- `mcp/vscode-agent-bridge/` — the MCP server (bundled)
+- `extension/` — the VS Code extension source
+- `docs/` — architecture and design decisions
+- `CONTEXT.md` — domain terminology and ubiquitous language
+
+## Coexistence with caveman-kit
+
+peer-agent-kit and caveman-kit can be installed together. Both kits inject hooks and statusline badges using distinct markers, so they compose additively: injections are concatenated, not conflicting, and uninstall order does not matter. Post-install user edits to settings and statusline survive both installs and uninstalls.
+
+## Hazards and mitigations
+
+**MCP server restart required after installation** — Changes to `~/.claude.json` take effect only when Claude Code restarts. Close and reopen your IDE.
+
+**Bridge down fallback** — If the vscode-agent-bridge MCP server is unavailable (crashed, not started), the session will warn once and fall back to local execution for that task. The warning appears only once per session, not per task.
