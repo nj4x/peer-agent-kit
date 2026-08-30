@@ -24,8 +24,8 @@ process.stdin.on('end', () => {
 
     // Claude Code delivers slash commands to this hook as an envelope, not
     // the literal text:
-    //   <command-name>/peer-agent</command-name><command-args>ultra</command-args>
-    // Reconstruct '/peer-agent ultra' for our own command; leave any other
+    //   <command-name>/peer-agent</command-name><command-args>max</command-args>
+    // Reconstruct '/peer-agent max' for our own command; leave any other
     // command's envelope untouched (and skip mode-change parsing for it, so
     // its own arguments can't misfire our triggers) while still falling
     // through to the reinforcement check below.

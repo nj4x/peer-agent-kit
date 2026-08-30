@@ -5,9 +5,9 @@
 const fs = require('fs');
 const path = require('path');
 
-// Matches the intensity levels defined in the preinstalled peer-agent skill's
-// SKILL.md (lite/full/ultra/wenyan-lite/wenyan-full/wenyan-ultra), plus 'off'.
-const VALID_MODES = ['off', 'lite', 'full', 'ultra', 'wenyan-lite', 'wenyan-full', 'wenyan-ultra'];
+// Matches the delegation modes defined in the preinstalled peer-agent skill's
+// SKILL.md (lite/full/max), plus 'off'.
+const VALID_MODES = ['off', 'lite', 'full', 'max'];
 
 function getDefaultMode() {
   const envMode = process.env.PEER_AGENT_DEFAULT_MODE;
@@ -108,7 +108,7 @@ function safeWriteFlag(flagPath, content) {
   }
 }
 
-// Longest valid mode is "wenyan-ultra" (12 bytes); 16 leaves slack without
+// Longest valid mode is "lite"/"full" (4 bytes); 16 leaves slack without
 // letting the flag be used to smuggle arbitrary content into context.
 const MAX_FLAG_BYTES = 16;
 
