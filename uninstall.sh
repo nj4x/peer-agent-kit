@@ -28,11 +28,13 @@ fi
 CLAUDE_DIR="$(node -e "console.log(JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')).claudeDir)")"
 SETTINGS_BACKUP="$(node -e "console.log(JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')).settingsBackup)")"
 STATUSLINE_BACKUP="$(node -e "const m=JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')); console.log(m.statuslineBackup || '')")"
+MCP_CONFIG_BACKUP="$(node -e "const m=JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')); console.log(m.mcpConfigBackup || '')")"
 SKILL_INSTALLED_BY_KIT="$(node -e "const m=JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')); console.log(m.skillInstalledByKit === true ? 'true' : 'false')")"
 SKILL_BACKUP="$(node -e "const m=JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')); console.log(m.skillBackup || '')")"
 
 SETTINGS="$CLAUDE_DIR/settings.json"
 STATUSLINE="$CLAUDE_DIR/statusline.sh"
+MCP_CONFIG="${HOME}/.claude.json"
 
 if [ ! -f "$SETTINGS_BACKUP" ]; then
   echo "error: settings backup not found at $SETTINGS_BACKUP" >&2
@@ -50,24 +52,39 @@ if [ -n "$STATUSLINE_BACKUP" ]; then
   fi
 fi
 
+# Restore MCP config from backup if it exists
+if [ -n "$MCP_CONFIG_BACKUP" ]; then
+  if [ -f "$MCP_CONFIG_BACKUP" ]; then
+    cp "$MCP_CONFIG_BACKUP" "$MCP_CONFIG"
+    echo "restored: $MCP_CONFIG"
+  else
+    echo "warning: MCP config backup recorded but missing at $MCP_CONFIG_BACKUP — left $MCP_CONFIG untouched" >&2
+  fi
+elif [ -f "$MCP_CONFIG" ]; then
+  # No backup means the file didn't exist before; remove the entire file if created by us
+  rm "$MCP_CONFIG"
+  echo "removed: $MCP_CONFIG (created during install)"
+fi
+
+# Remove VS Code extension symlink if installed
+VSCODE_EXT_DIR="$HOME/.vscode/extensions"
+if [ -d "$VSCODE_EXT_DIR" ]; then
+  PUBLISHER="nj4x"
+  NAME="vscode-agent-bridge"
+  VERSION="0.1.0"
+  LINK="$VSCODE_EXT_DIR/$PUBLISHER.$NAME-$VERSION"
+  if [ -L "$LINK" ]; then
+    rm "$LINK"
+    echo "removed: $LINK (extension symlink)"
+  fi
+fi
+
 # Skill cleanup (ADR 0002/0003): remove entirely if the kit installed it;
-# otherwise restore the pre-patch backup and leave the skill in place.
+# otherwise leave it (copied installation is permanent).
 SKILL_DIR="$CLAUDE_DIR/skills/peer-agent"
 if [ "$SKILL_INSTALLED_BY_KIT" = "true" ]; then
   rm -rf "$SKILL_DIR"
   echo "removed: $SKILL_DIR (installed by peer-agent-kit)"
-elif [ -n "$SKILL_BACKUP" ]; then
-  if [ -f "$SKILL_BACKUP" ] && [ -d "$SKILL_DIR" ]; then
-    if cp "$SKILL_BACKUP" "$SKILL_DIR/SKILL.md"; then
-      echo "restored: $SKILL_DIR/SKILL.md"
-    else
-      echo "warning: failed to restore $SKILL_DIR/SKILL.md from backup — left as-is" >&2
-    fi
-  elif [ ! -d "$SKILL_DIR" ]; then
-    echo "warning: $SKILL_DIR no longer exists — skipping SKILL.md restore" >&2
-  else
-    echo "warning: skill backup recorded but missing at $SKILL_BACKUP — left SKILL.md untouched" >&2
-  fi
 fi
 
 rm -rf "$KIT_HOME"

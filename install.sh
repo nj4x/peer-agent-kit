@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # peer-agent-kit installer.
 #
-# Preserves the existing Claude Code configuration: injects two hook entries
-# (SessionStart, UserPromptSubmit) into settings.json and a small badge block
-# into statusline.sh. Everything touched is backed up under
-# ~/.peer-agent-kit/backup/ so uninstall.sh can restore it exactly.
+# Registers the vscode-agent-bridge MCP server, installs the VS Code extension,
+# injects hook entries (SessionStart, UserPromptSubmit) into settings.json,
+# and patches statusline.sh with a peer-agent badge. Everything touched is
+# backed up under ~/.peer-agent-kit/backup/ so uninstall.sh can restore it
+# exactly (byte-for-byte for settings/statusline, by removing for MCP/extension).
 #
-# The peer-agent skill ships with this kit (skills/peer-agent/); if it is not
-# yet present at $CLAUDE_CONFIG_DIR/skills/peer-agent, the installer symlinks
+# The peer-agent skill ships with this kit (skills/peer-agent/); if not yet
+# present at $CLAUDE_CONFIG_DIR/skills/peer-agent, the installer copies
 # it in — with an interactive prompt, or non-interactively when
 # PEER_AGENT_KIT_INSTALL_SKILL=1 or --install-skill is passed.
 set -euo pipefail
@@ -18,8 +19,10 @@ KIT_HOME="$HOME/.peer-agent-kit"
 BACKUP_DIR="$KIT_HOME/backup"
 SETTINGS="$CLAUDE_DIR/settings.json"
 STATUSLINE="$CLAUDE_DIR/statusline.sh"
+MCP_CONFIG="${HOME}/.claude.json"
 SKILL_PATH="$CLAUDE_DIR/skills/peer-agent/SKILL.md"
 SKILL_SOURCE="$KIT_DIR/skills/peer-agent"
+EXTENSION_DIR="$KIT_DIR/extension"
 
 INSTALL_SKILL=0
 [ "${1:-}" = "--install-skill" ] && INSTALL_SKILL=1
@@ -43,12 +46,18 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v npm >/dev/null 2>&1; then
+  echo "error: npm not found on PATH (required for extension build)" >&2
+  exit 1
+fi
+
 if [ ! -f "$SETTINGS" ]; then
   echo "error: $SETTINGS not found" >&2
   exit 1
 fi
 
 SKILL_INSTALLED_BY_KIT=false
+SKILL_DIR="$CLAUDE_DIR/skills/peer-agent"
 if [ ! -f "$SKILL_PATH" ]; then
   if [ "$INSTALL_SKILL" != "1" ]; then
     if [ -t 0 ]; then
@@ -62,9 +71,9 @@ if [ ! -f "$SKILL_PATH" ]; then
   fi
   [ "$INSTALL_SKILL" = "1" ] || skill_missing_abort
 
-  echo "installing peer-agent skill (symlink to $SKILL_SOURCE)..."
+  echo "installing peer-agent skill (copy from $SKILL_SOURCE)..."
   mkdir -p "$CLAUDE_DIR/skills"
-  if ! ln -s "$SKILL_SOURCE" "$CLAUDE_DIR/skills/peer-agent"; then
+  if ! cp -r "$SKILL_SOURCE" "$SKILL_DIR"; then
     echo "warning: automated skill install failed" >&2
     skill_missing_abort
   fi
@@ -79,7 +88,37 @@ fi
 # can find SKILL.md via CLAUDE_PLUGIN_ROOT regardless of how it's linked in.
 PLUGIN_ROOT="$(cd -P "$(dirname "$SKILL_PATH")/../.." && pwd)"
 
+# Build and install extension (skip gracefully if ~/.vscode/extensions/ missing)
+echo "building VS Code extension..."
+cd "$EXTENSION_DIR"
+if npm ci --prefer-offline 2>/dev/null; then
+  npm run compile 2>/dev/null || true
+  VSCODE_EXT_DIR="$HOME/.vscode/extensions"
+  if [ -d "$VSCODE_EXT_DIR" ]; then
+    if npm run install-dev 2>/dev/null; then
+      echo "extension installed: $VSCODE_EXT_DIR"
+    else
+      echo "warning: extension install-dev failed" >&2
+    fi
+  else
+    echo "warning: $VSCODE_EXT_DIR not found — skipping extension install" >&2
+  fi
+else
+  echo "warning: npm ci failed — skipping extension build" >&2
+fi
+cd "$KIT_DIR"
+
+# Register MCP server in ~/.claude.json, backing up the original entry if present
+echo "registering vscode-agent-bridge MCP server..."
 mkdir -p "$KIT_HOME/hooks" "$BACKUP_DIR"
+
+MCP_BACKUP_JSON="null"
+if [ -f "$MCP_CONFIG" ]; then
+  cp "$MCP_CONFIG" "$BACKUP_DIR/claude.json.bak"
+  MCP_BACKUP_JSON="\"$BACKUP_DIR/claude.json.bak\""
+fi
+node "$KIT_DIR/lib/mcp-patch.js" "$MCP_CONFIG" "$KIT_DIR"
+
 cp "$KIT_DIR"/hooks/*.js "$KIT_HOME/hooks/"
 
 cp "$SETTINGS" "$BACKUP_DIR/settings.json.bak"
@@ -118,6 +157,7 @@ cat > "$KIT_HOME/manifest.json" <<JSON
   "claudeDir": "$CLAUDE_DIR",
   "settingsBackup": "$BACKUP_DIR/settings.json.bak",
   "statuslineBackup": $STATUSLINE_BACKUP_JSON,
+  "mcpConfigBackup": $MCP_BACKUP_JSON,
   "pluginRoot": "$PLUGIN_ROOT",
   "skillInstalledByKit": $SKILL_INSTALLED_BY_KIT,
   "skillBackup": $SKILL_BACKUP_JSON
