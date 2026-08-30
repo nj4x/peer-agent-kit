@@ -224,13 +224,148 @@ def test_exclude_workspace_rag_entry_without_trailing_slash(tmp_path):
     workspace.mkdir()
     git_info = workspace / ".git" / "info"
     git_info.mkdir(parents=True)
-    
+
     exclude_file = git_info / "exclude"
     exclude_file.write_text("*.pyc\n.workspace_rag\n")
-    
+
     _exclude_workspace_rag(str(workspace))
-    
+
     content = exclude_file.read_text()
     # Should not add duplicate
     lines = [l.strip() for l in content.splitlines()]
     assert lines.count(".workspace_rag") + lines.count(".workspace_rag/") == 1
+
+
+# Tests for ADR-0077 brief-file offload
+
+from bridge.bridge import (
+    BRIEF_WARN_BYTES,
+    ENCODED_BRIEF_THRESHOLD,
+    _encoded_length,
+    _prepare_dispatch_prompt,
+)
+from bridge.queue import BridgeQueue
+
+
+def test_encoded_length_matches_encode_uri_component_semantics():
+    """Newlines and spaces inflate to %0A/%20 (3 chars each); unreserved chars don't."""
+    assert _encoded_length("abc") == 3
+    assert _encoded_length("a b") == len("a%20b")
+    assert _encoded_length("a\nb") == len("a%0Ab")
+    # encodeURIComponent leaves these unescaped
+    assert _encoded_length("-_.!~*'()") == len("-_.!~*'()")
+
+
+def test_encoded_length_multibyte_inflates_more_than_raw_chars():
+    """Non-ASCII code units cost multiple %XX triplets (ADR-0077 encoding-agnostic claim)."""
+    raw = "中"  # CJK char, 3 UTF-8 bytes
+    assert _encoded_length(raw) == 9  # %XX %XX %XX
+
+
+def test_prepare_dispatch_prompt_returns_original_under_threshold(tmp_path, monkeypatch):
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    queue = BridgeQueue()
+    record = queue.submit("short question", "/tmp")
+
+    prompt = _prepare_dispatch_prompt(record)
+
+    assert prompt == "short question"
+    assert not (tmp_path / ".vscode-agent-bridge" / "briefs").exists()
+
+
+def test_prepare_dispatch_prompt_offloads_over_threshold(tmp_path, monkeypatch):
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    queue = BridgeQueue()
+    long_question = "x" * (ENCODED_BRIEF_THRESHOLD + 1)
+    record = queue.submit(long_question, "/tmp")
+
+    prompt = _prepare_dispatch_prompt(record)
+
+    brief_path = tmp_path / ".vscode-agent-bridge" / "briefs" / f"brief-{record.id}.md"
+    assert brief_path.exists()
+    assert brief_path.read_text() == long_question
+    assert str(brief_path) in prompt
+    assert "read it first" in prompt
+
+
+def test_prepare_dispatch_prompt_boundary_stays_inline(tmp_path, monkeypatch):
+    """Encoded length exactly at threshold dispatches inline (ADR: 'at or under')."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    queue = BridgeQueue()
+    question = "x" * ENCODED_BRIEF_THRESHOLD
+    record = queue.submit(question, "/tmp")
+
+    prompt = _prepare_dispatch_prompt(record)
+
+    assert prompt == question
+
+
+def test_prepare_dispatch_prompt_warns_over_50kb(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    queue = BridgeQueue()
+    long_question = "x" * (BRIEF_WARN_BYTES + 1)
+    record = queue.submit(long_question, "/tmp")
+
+    with caplog.at_level("WARNING", logger="vscode-agent-bridge.bridge"):
+        _prepare_dispatch_prompt(record)
+
+    assert any("exceeds" in message for message in caplog.messages)
+
+
+def test_prepare_dispatch_prompt_makedirs_failure_raises(tmp_path, monkeypatch):
+    """A file blocking the briefs dir creation is treated the same as a write failure (ID-013)."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    bridge_root = tmp_path / ".vscode-agent-bridge"
+    bridge_root.mkdir()
+    (bridge_root / "briefs").write_text("not a directory")
+
+    queue = BridgeQueue()
+    long_question = "x" * (ENCODED_BRIEF_THRESHOLD + 1)
+    record = queue.submit(long_question, "/tmp")
+
+    with pytest.raises(OSError):
+        _prepare_dispatch_prompt(record)
+
+
+async def test_pump_offloads_long_question_to_brief_file(wired, tmp_path, monkeypatch):
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    bridge, ws = wired
+    long_question = "x" * (ENCODED_BRIEF_THRESHOLD + 1)
+    record = bridge.queue.submit(long_question, "/tmp")
+
+    await bridge._pump(1800.0)
+    dispatched = await ws.receive_json()
+
+    assert record.status == "dispatched"
+    assert str(tmp_path) in dispatched["prompt"]
+    assert dispatched["prompt"] != long_question
+
+
+async def test_pump_fails_task_on_lone_surrogate_question(wired, tmp_path, monkeypatch):
+    """A lone surrogate can't be UTF-8 encoded (UnicodeEncodeError, not OSError) —
+    the task must still fail cleanly rather than crash the pump (ADR-0077 failure policy)."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    bridge, ws = wired
+    unencodable = "x" * ENCODED_BRIEF_THRESHOLD + "\ud800"
+    record = bridge.queue.submit(unencodable, "/tmp")
+
+    await bridge._pump(1800.0)
+
+    assert record.status == "failed"
+    assert record.reason == "internal_error"
+
+
+async def test_pump_fails_task_when_brief_write_fails(wired, tmp_path, monkeypatch):
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    bridge_root = tmp_path / ".vscode-agent-bridge"
+    bridge_root.mkdir()
+    (bridge_root / "briefs").write_text("not a directory")
+
+    bridge, ws = wired
+    long_question = "x" * (ENCODED_BRIEF_THRESHOLD + 1)
+    record = bridge.queue.submit(long_question, "/tmp")
+
+    await bridge._pump(1800.0)
+
+    assert record.status == "failed"
+    assert record.reason == "internal_error"

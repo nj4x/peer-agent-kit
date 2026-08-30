@@ -20,7 +20,7 @@ When a delegated task stops progressing because the peer agent needs human input
 *Status*: no realizing ADR. The peer agent (cline-sr) is installed from a private Marketplace with no local build access — its dispatch code cannot be patched to emit a waiting-for-input signal. Revisit if cline-sr upstream adds such a hook, or if a passive-detection design (watching existing output/log signals) is proposed.
 
 **FS-PAK-004 — Low-friction repeated delegation**
-Delegating successive tasks within the same project tree (including subdirectories of an already-open workspace) shall not incur avoidable instance restarts or loss of peer-agent working context.
+Delegating successive tasks within the same project tree (including subdirectories of an already-open workspace) shall not incur avoidable instance restarts, loss of peer-agent working context, or incomplete delivery of the delegating caller's task description.
 
 **FS-PAK-005 — Unattended instance readiness with the user's editor profile**
 When a session spawns its dedicated peer-agent window, the window shall become ready for delegated work without requiring interactive first-run responses from the user, and shall reflect the user's once-configured editor preferences (theme, pane layout, keybindings) without per-session reconfiguration.

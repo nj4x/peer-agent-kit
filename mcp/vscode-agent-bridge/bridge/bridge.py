@@ -9,17 +9,27 @@ from __future__ import annotations
 
 import asyncio
 import os
+import urllib.parse
 from pathlib import Path
 
 from bridge.hookserver import HookServer
 from bridge.instance import InstanceManager
 from bridge.logsetup import get_logger, set_task_id
-from bridge.queue import BridgeQueue
+from bridge.queue import BridgeQueue, Record
 
 logger = get_logger("bridge")
 
 POLL_INTERVAL = 0.25
 SWEEP_INTERVAL = 5.0
+
+# Conservative budget under the ~2000-char OS/VS Code URI lower bound, leaving
+# headroom for the URI scheme/path/param overhead (ADR-0077).
+ENCODED_BRIEF_THRESHOLD = 1900
+# Signal for oversized-brief investigation, not a hard cap (ADR-0077).
+BRIEF_WARN_BYTES = 50 * 1024
+# encodeURIComponent()'s unescaped set beyond letters/digits/_.-~, which
+# urllib.parse.quote already leaves unescaped by default (ADR-0077 ID-011).
+_ENCODE_URI_COMPONENT_SAFE = "!'()*-._~"
 
 
 def _ask_timeout() -> float:
@@ -83,6 +93,50 @@ def _exclude_workspace_rag(workspace: str) -> None:
         logger.warning("failed to exclude .workspace_rag in %s: %s", workspace, e)
 
 
+def _encoded_length(text: str) -> int:
+    """Length of `text` as encodeURIComponent() would produce it (ADR-0077).
+
+    The URI transport is the extension's `encodeURIComponent(prompt)` call
+    (`extension/src/extension.ts`); this must measure the same string.
+    """
+    return len(urllib.parse.quote(text, safe=_ENCODE_URI_COMPONENT_SAFE))
+
+
+def _briefs_dir() -> Path:
+    return Path.home() / ".vscode-agent-bridge" / "briefs"
+
+
+def _prepare_dispatch_prompt(record: Record) -> str:
+    """Return the prompt to dispatch for `record`, offloading to a brief file
+    when the encoded prompt would exceed the URI transport's practical limit
+    (ADR-0077). Raises OSError or UnicodeError if the brief file can't be
+    written (including a lone-surrogate question that can't be UTF-8
+    encoded); the caller treats that as a fatal dispatch prerequisite, not
+    best-effort.
+    """
+    question = record.question
+    if _encoded_length(question) <= ENCODED_BRIEF_THRESHOLD:
+        return question
+
+    briefs_dir = _briefs_dir()
+    briefs_dir.mkdir(parents=True, exist_ok=True)
+    brief_path = briefs_dir / f"brief-{record.id}.md"
+    brief_path.write_text(question, encoding="utf-8")
+
+    size = brief_path.stat().st_size
+    logger.info(
+        "task %s: brief offloaded to %s (encoded length %d bytes, file %d bytes)",
+        record.id, brief_path, _encoded_length(question), size,
+    )
+    if size > BRIEF_WARN_BYTES:
+        logger.warning(
+            "brief file %s exceeds %d bytes (%d bytes) — consider a workspace file reference instead",
+            brief_path, BRIEF_WARN_BYTES, size,
+        )
+
+    return f"Your full task brief is at `{brief_path}` — read it first, then proceed."
+
+
 def _validate(question: str, workspace: str) -> str:
     question = question.strip()
     if not question:
@@ -132,15 +186,29 @@ class Bridge:
         set_task_id(record.id)
         try:
             await self.instance.ensure_ready(record.workspace, self.hooks.port)
-            await self.hooks.dispatch(record.question)
+        except Exception:
+            logger.exception("instance not ready for task %s", record.id)
+            await self._fail_and_retry(record.id, "instance_down", async_timeout)
+            return
+        try:
+            prompt = _prepare_dispatch_prompt(record)
+        except (OSError, UnicodeError):
+            logger.exception("brief file write failed for task %s", record.id)
+            await self._fail_and_retry(record.id, "internal_error", async_timeout)
+            return
+        try:
+            await self.hooks.dispatch(prompt)
         except Exception:
             logger.exception("dispatch of task %s failed", record.id)
-            self.queue.fail(record.id, "instance_down")
-            set_task_id(None)
-            await self._pump(async_timeout)
+            await self._fail_and_retry(record.id, "instance_down", async_timeout)
             return
         logger.info("_pump: exit")
         set_task_id(None)
+
+    async def _fail_and_retry(self, record_id: str, reason: str, async_timeout: float) -> None:
+        self.queue.fail(record_id, reason)
+        set_task_id(None)
+        await self._pump(async_timeout)
 
     async def ask(self, question: str, workspace: str) -> dict:
         """Submit a question and block until answered, failed, or ask-timeout."""

@@ -40,3 +40,7 @@ WHEN the peer agent enters a state of waiting for human input on a delegated tas
 **SRS-PAK-007 — First-run prompt suppression and profile propagation**
 WHEN the system spawns a peer-agent instance with a fresh instance environment, THE SYSTEM SHALL suppress interactive first-run prompts that would block task dispatch, AND SHALL apply the user's previously configured editor profile to the new instance environment when one exists.
 *Source FS*: FS-PAK-005
+
+**SRS-PAK-008 — Brief delivery integrity**
+WHEN a delegated task is dispatched to the peer agent, THE SYSTEM SHALL deliver the delegating caller's complete question text to the peer agent, regardless of question length.
+*Source FS*: FS-PAK-004
