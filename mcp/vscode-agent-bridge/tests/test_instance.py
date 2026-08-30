@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 
 import pytest
 
@@ -8,7 +9,6 @@ from bridge.instance import (
     InstanceManager,
     InstanceUnreachable,
     SPAWN_TIMEOUT,
-    _seed_settings,
 )
 
 
@@ -26,9 +26,21 @@ class FakeProcess:
 
 @pytest.fixture(autouse=True)
 def tmp_data_dir(tmp_path, monkeypatch):
-    data_dir = tmp_path / "data"
-    monkeypatch.setattr("bridge.instance.DATA_DIR", data_dir)
-    return data_dir
+    # Patches expanduser, not a module constant: _data_dir is now computed
+    # per-instance from a PID-scoped `~` path, so no fixed symbol to swap.
+    real_expanduser = os.path.expanduser
+
+    def _fake_expanduser(path: str) -> str:
+        if path.startswith("~"):
+            return str(tmp_path) + path[1:]
+        return real_expanduser(path)
+
+    monkeypatch.setattr(os.path, "expanduser", _fake_expanduser)
+    return tmp_path
+
+
+def _settings_path(manager: InstanceManager):
+    return manager._data_dir / "User" / "settings.json"
 
 
 @pytest.fixture
@@ -101,17 +113,19 @@ async def test_ensure_ready_times_out_if_extension_never_connects(fake_spawn, mo
 
 
 def test_seed_settings_creates_file_with_defaults(tmp_data_dir):
-    _seed_settings()
-    written = json.loads((tmp_data_dir / "User" / "settings.json").read_text())
+    manager = InstanceManager()
+    manager._seed_settings()
+    written = json.loads(_settings_path(manager).read_text())
     assert written == SEED_SETTINGS
 
 
 def test_seed_settings_preserves_existing_overrides(tmp_data_dir):
-    settings_path = tmp_data_dir / "User" / "settings.json"
+    manager = InstanceManager()
+    settings_path = _settings_path(manager)
     settings_path.parent.mkdir(parents=True)
     settings_path.write_text(json.dumps({"update.mode": "manual", "editor.fontSize": 15}))
 
-    _seed_settings()
+    manager._seed_settings()
     written = json.loads(settings_path.read_text())
     assert written["update.mode"] == "manual"
     assert written["editor.fontSize"] == 15
@@ -119,11 +133,12 @@ def test_seed_settings_preserves_existing_overrides(tmp_data_dir):
 
 
 def test_seed_settings_leaves_unparsable_file_untouched(tmp_data_dir):
-    settings_path = tmp_data_dir / "User" / "settings.json"
+    manager = InstanceManager()
+    settings_path = _settings_path(manager)
     settings_path.parent.mkdir(parents=True)
     settings_path.write_text("{not json")
 
-    _seed_settings()
+    manager._seed_settings()
     assert settings_path.read_text() == "{not json"
 
 
@@ -138,7 +153,31 @@ async def test_ensure_ready_seeds_settings_before_spawn(fake_spawn, tmp_data_dir
     await manager.ensure_ready("/tmp/repo", port=4321)
     await task
 
-    assert (tmp_data_dir / "User" / "settings.json").exists()
+    assert _settings_path(manager).exists()
+
+
+def test_data_dir_is_scoped_to_process_pid(tmp_data_dir, monkeypatch):
+    monkeypatch.setattr(os, "getpid", lambda: 1001)
+    manager_a = InstanceManager()
+
+    monkeypatch.setattr(os, "getpid", lambda: 1002)
+    manager_b = InstanceManager()
+
+    assert manager_a._data_dir != manager_b._data_dir
+    assert manager_a._data_dir.name == "data-1001"
+    assert manager_b._data_dir.name == "data-1002"
+
+
+def test_seed_settings_lands_in_pid_scoped_dir(tmp_data_dir, monkeypatch):
+    monkeypatch.setattr(os, "getpid", lambda: 1003)
+    manager = InstanceManager()
+
+    manager._seed_settings()
+
+    settings_path = _settings_path(manager)
+    assert manager._data_dir.name == "data-1003"
+    assert settings_path.exists()
+    assert json.loads(settings_path.read_text()) == SEED_SETTINGS
 
 
 async def test_close_terminates_process(fake_spawn):
