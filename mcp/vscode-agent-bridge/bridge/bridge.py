@@ -30,12 +30,66 @@ def _async_timeout() -> float:
     return float(os.getenv("BRIDGE_ASYNC_TIMEOUT", "1800"))
 
 
+def _exclude_workspace_rag(workspace: str) -> None:
+    """Ensure .workspace_rag/ is excluded from git in the workspace.
+    
+    This is non-fatal: any errors are logged and swallowed.
+    """
+    git_path = Path(workspace) / ".git"
+    if not git_path.exists():
+        return  # Not a git repo, nothing to do
+    
+    # Handle worktree case: .git is a file pointing elsewhere
+    if git_path.is_file():
+        # Worktree: .git is a file, try to resolve but don't fail if weird
+        try:
+            git_content = git_path.read_text().strip()
+            # Format: "gitdir: <path>"
+            if git_content.startswith("gitdir: "):
+                git_path = Path(git_content[8:].strip())
+            else:
+                git_path = Path(git_content)
+        except (OSError, IOError):
+            logger.warning("worktree .git file unreadable: %s", workspace)
+            return
+    
+    exclude_file = git_path / "info" / "exclude"
+    
+    try:
+        # Try to create info dir if needed (only for regular repos)
+        if git_path.is_dir():
+            exclude_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Check if entry already exists
+        if exclude_file.exists():
+            try:
+                content = exclude_file.read_text()
+                # Check for existing entry (with or without trailing slash)
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    if stripped == ".workspace_rag/" or stripped == ".workspace_rag":
+                        return  # Already excluded, nothing to do
+                # File exists but needs new entry - ensure newline at end
+                if content and not content.endswith("\n"):
+                    content += "\n"
+                content += ".workspace_rag/\n"
+                exclude_file.write_text(content)
+            except (OSError, IOError) as e:
+                logger.warning("failed to update git exclude file: %s", e)
+        else:
+            # Fresh file, just write the entry
+            exclude_file.write_text(".workspace_rag/\n")
+    except (OSError, IOError) as e:
+        logger.warning("failed to exclude .workspace_rag in %s: %s", workspace, e)
+
+
 def _validate(question: str, workspace: str) -> str:
     question = question.strip()
     if not question:
         raise ValueError("question must not be empty")
     if not Path(workspace).is_dir():
         raise ValueError(f"workspace is not an existing directory: {workspace}")
+    _exclude_workspace_rag(workspace)
     return question
 
 

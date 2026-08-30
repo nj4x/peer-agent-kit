@@ -118,3 +118,119 @@ def test_latest_vscode_exthost_dir_picks_latest(tmp_path, monkeypatch):
 
     result = bridge._latest_vscode_exthost_dir()
     assert result == str(logs_dir / "20260829T110000")
+
+
+# Tests for _exclude_workspace_rag
+from bridge.bridge import _exclude_workspace_rag
+
+
+def test_exclude_workspace_rag_fresh_repo(tmp_path):
+    """Fresh git repo with no exclude file - should create it."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    git_info = workspace / ".git" / "info"
+    git_info.mkdir(parents=True)
+    
+    _exclude_workspace_rag(str(workspace))
+    
+    exclude_file = workspace / ".git" / "info" / "exclude"
+    assert exclude_file.exists()
+    assert exclude_file.read_text() == ".workspace_rag/\n"
+
+
+def test_exclude_workspace_rag_existing_exclude_no_entry(tmp_path):
+    """Existing exclude file without .workspace_rag entry - should append."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    git_info = workspace / ".git" / "info"
+    git_info.mkdir(parents=True)
+    
+    exclude_file = git_info / "exclude"
+    exclude_file.write_text("*.pyc\n")
+    
+    _exclude_workspace_rag(str(workspace))
+    
+    content = exclude_file.read_text()
+    assert "*.pyc\n" in content
+    assert ".workspace_rag/\n" in content
+
+
+def test_exclude_workspace_rag_already_excluded(tmp_path):
+    """Existing exclude file with .workspace_rag entry - no duplicate."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    git_info = workspace / ".git" / "info"
+    git_info.mkdir(parents=True)
+    
+    exclude_file = git_info / "exclude"
+    exclude_file.write_text("*.pyc\n.workspace_rag/\n")
+    
+    _exclude_workspace_rag(str(workspace))
+    
+    content = exclude_file.read_text()
+    assert content.count(".workspace_rag") == 1
+
+
+def test_exclude_workspace_rag_non_git_workspace(tmp_path):
+    """Non-git workspace - no-op, no error."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    
+    _exclude_workspace_rag(str(workspace))
+    
+    # Should not create .git or anything
+    assert not (workspace / ".git").exists()
+
+
+def test_exclude_workspace_rag_no_trailing_newline(tmp_path):
+    """Existing exclude file without trailing newline - should add one."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    git_info = workspace / ".git" / "info"
+    git_info.mkdir(parents=True)
+    
+    exclude_file = git_info / "exclude"
+    exclude_file.write_text("*.pyc")  # No trailing newline
+    
+    _exclude_workspace_rag(str(workspace))
+    
+    content = exclude_file.read_text()
+    assert content == "*.pyc\n.workspace_rag/\n"
+
+
+def test_exclude_workspace_rag_worktree(tmp_path):
+    """Worktree case: .git is a file."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    
+    # Create a real git dir elsewhere
+    real_git = tmp_path / "real_git"
+    (real_git / "info").mkdir(parents=True)
+    
+    # Create .git file pointing to real git dir
+    git_file = workspace / ".git"
+    git_file.write_text(f"gitdir: {real_git}")
+    
+    _exclude_workspace_rag(str(workspace))
+    
+    exclude_file = real_git / "info" / "exclude"
+    assert exclude_file.exists()
+    assert ".workspace_rag/\n" in exclude_file.read_text()
+
+
+def test_exclude_workspace_rag_entry_without_trailing_slash(tmp_path):
+    """Existing exclude with .workspace_rag (no slash) - no duplicate."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    git_info = workspace / ".git" / "info"
+    git_info.mkdir(parents=True)
+    
+    exclude_file = git_info / "exclude"
+    exclude_file.write_text("*.pyc\n.workspace_rag\n")
+    
+    _exclude_workspace_rag(str(workspace))
+    
+    content = exclude_file.read_text()
+    # Should not add duplicate
+    lines = [l.strip() for l in content.splitlines()]
+    assert lines.count(".workspace_rag") + lines.count(".workspace_rag/") == 1
