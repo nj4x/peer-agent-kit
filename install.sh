@@ -24,6 +24,18 @@ SKILL_PATH="$CLAUDE_DIR/skills/peer-agent/SKILL.md"
 SKILL_SOURCE="$KIT_DIR/skills/peer-agent"
 EXTENSION_DIR="$KIT_DIR/extension"
 
+if [ "${1:-}" = "--vscode-config" ]; then
+  if command -v code >/dev/null 2>&1; then
+    code --user-data-dir "$HOME/.vscode-agent-bridge/data" >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    echo "opened VS Code for template profile setup — configure it, then close the window"
+    exit 0
+  else
+    echo "error: 'code' CLI not found" >&2
+    exit 1
+  fi
+fi
+
 INSTALL_SKILL=0
 [ "${1:-}" = "--install-skill" ] && INSTALL_SKILL=1
 [ "${PEER_AGENT_KIT_INSTALL_SKILL:-}" = "1" ] && INSTALL_SKILL=1
@@ -104,10 +116,11 @@ SKILL_DIR="$CLAUDE_DIR/skills/peer-agent"
 if [ ! -f "$SKILL_PATH" ]; then
   if [ "$INSTALL_SKILL" != "1" ]; then
     if [ -t 0 ]; then
-      printf 'peer-agent skill not found. Install %s now? (y/N) ' "$SKILL_SOURCE"
+      printf 'peer-agent skill not found. Install %s now? (Y/n) ' "$SKILL_SOURCE"
       if read -r answer; then
         case "$answer" in
-          y|Y|yes|YES) INSTALL_SKILL=1 ;;
+          n|N|no|NO) ;;
+          *) INSTALL_SKILL=1 ;;
         esac
       fi
     fi
