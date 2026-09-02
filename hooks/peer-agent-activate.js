@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// peer-agent-kit — SessionStart hook.
+// peer-agent-kit — SessionStart and SubagentStart hook.
 //
 // Resolves the active mode, persists it to a flag file (read by the
 // statusline badge and the UserPromptSubmit hook), and — unless mode is
@@ -12,12 +12,18 @@ const path = require('path');
 const { VALID_MODES, getDefaultMode, safeWriteFlag, readFlag, clearFlag, resolveFlagPath, ensureGitExclude } = require('./peer-agent-config');
 
 let cwd = null;
+let hookEventName = 'SessionStart';
 try {
   if (!process.stdin.isTTY) {
     const raw = fs.readFileSync(0, 'utf8');
     if (raw) {
       const data = JSON.parse(raw);
       if (data && typeof data.cwd === 'string') cwd = data.cwd;
+      // Also registered under SubagentStart (ADR 0079) so subagents inherit
+      // the same policy — SubagentStart requires the JSON hookSpecificOutput
+      // envelope below, unlike SessionStart's former plain-text output, so
+      // the emitted hookEventName must echo whichever event actually fired.
+      if (data && typeof data.hook_event_name === 'string') hookEventName = data.hook_event_name;
     }
   }
 } catch (e) { /* no/bad stdin → global flag fallback */ }
@@ -91,4 +97,9 @@ const filtered = body.split('\n').reduce((acc, line) => {
   return acc;
 }, []);
 
-process.stdout.write(`PEER_AGENT MODE ACTIVE — level: ${mode}\n\n` + filtered.join('\n'));
+process.stdout.write(JSON.stringify({
+  hookSpecificOutput: {
+    hookEventName,
+    additionalContext: `PEER_AGENT MODE ACTIVE — level: ${mode}\n\n` + filtered.join('\n')
+  }
+}));

@@ -17,14 +17,36 @@ teardown() {
   rm -rf "$HOME"
 }
 
-# Runs the hook with the given cwd on stdin. No cwd argument means no stdin
-# payload, which exercises the global-flag fallback path.
+# Runs the hook with the given cwd on stdin and extracts additionalContext
+# from its JSON hookSpecificOutput envelope (or passes non-JSON output, i.e.
+# a stderr-only failure path, through unchanged) so existing assertions can
+# keep matching on plain ruleset text.
+#
+# Known gap: if the hook ever regresses to plain-text stdout, this passthrough
+# masks it for the tests below that use run_hook — their asserted substrings
+# need no JSON escaping and appear verbatim either way. Only the raw-envelope
+# tests further down (asserting on `hookEventName`/`additionalContext` keys
+# directly, bypassing run_hook) actually guard the JSON envelope shape.
 run_hook() {
+  local payload
   if [ "$#" -eq 0 ]; then
-    printf '{}' | node "$KIT_DIR/hooks/peer-agent-activate.js" 2>&1
+    payload='{}'
   else
-    printf '{"cwd":"%s"}' "$1" | node "$KIT_DIR/hooks/peer-agent-activate.js" 2>&1
+    payload="$(printf '{"cwd":"%s"}' "$1")"
   fi
+  printf '%s' "$payload" | node "$KIT_DIR/hooks/peer-agent-activate.js" 2>&1 | node -e '
+    let raw = "";
+    process.stdin.on("data", c => { raw += c; });
+    process.stdin.on("end", () => {
+      if (!raw) { process.stdout.write(""); return; }
+      try {
+        const parsed = JSON.parse(raw);
+        process.stdout.write((parsed.hookSpecificOutput && parsed.hookSpecificOutput.additionalContext) || "");
+      } catch (e) {
+        process.stdout.write(raw);
+      }
+    });
+  '
 }
 
 # Creates a git repo with a .claude/ dir holding the given mode, echoes its path.
@@ -127,4 +149,33 @@ make_repo() {
 
   [[ "$output" == *"could not read"* ]]
   [[ "$output" == *"SKILL.md"* ]]
+}
+
+@test "defaults hookEventName to SessionStart when the input omits it" {
+  echo "full" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
+
+  raw="$(printf '{}' | node "$KIT_DIR/hooks/peer-agent-activate.js")"
+
+  [[ "$raw" == *'"hookEventName":"SessionStart"'* ]]
+  [[ "$raw" == *'"additionalContext"'* ]]
+}
+
+@test "echoes hook_event_name back so SubagentStart deliveries are accepted" {
+  echo "full" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
+
+  raw="$(printf '{"hook_event_name":"SubagentStart"}' | node "$KIT_DIR/hooks/peer-agent-activate.js")"
+
+  [[ "$raw" == *'"hookEventName":"SubagentStart"'* ]]
+  [[ "$raw" == *'"additionalContext"'* ]]
+  [[ "$raw" == *"PEER_AGENT MODE ACTIVE"* ]]
+}
+
+@test "honors the repo-scoped mode flag via cwd under SubagentStart" {
+  echo "full" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
+  repo="$(make_repo max)"
+
+  raw="$(printf '{"cwd":"%s","hook_event_name":"SubagentStart"}' "$repo" | node "$KIT_DIR/hooks/peer-agent-activate.js")"
+
+  [[ "$raw" == *'"hookEventName":"SubagentStart"'* ]]
+  [[ "$raw" == *"PEER_AGENT MODE ACTIVE — level: max"* ]]
 }

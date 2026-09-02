@@ -2,7 +2,7 @@
 
 Installer kit that wires the `peer-agent` Claude Code skill and `vscode-agent-bridge` MCP server into an existing Claude Code configuration.
 
-`install.sh` registers the vscode-agent-bridge MCP server in `~/.claude.json`, installs the VS Code extension into `~/.vscode/extensions/`, and injects three hook entries (`SessionStart`, `UserPromptSubmit`) and a statusline badge into the Claude Code configuration. Everything it touches is backed up, so `uninstall.sh` can restore the original configuration exactly.
+`install.sh` registers the vscode-agent-bridge MCP server in `~/.claude.json`, installs the VS Code extension into `~/.vscode/extensions/`, and injects hook entries (`SessionStart`, `SubagentStart`, `UserPromptSubmit`) and a statusline badge into the Claude Code configuration. Everything it touches is backed up, so `uninstall.sh` can restore the original configuration exactly.
 
 ## Quick Install
 
