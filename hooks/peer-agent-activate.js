@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { getDefaultMode, safeWriteFlag, readFlag, clearFlag, resolveFlagPath, ensureGitExclude } = require('./peer-agent-config');
+const { VALID_MODES, getDefaultMode, safeWriteFlag, readFlag, clearFlag, resolveFlagPath, ensureGitExclude } = require('./peer-agent-config');
 
 let cwd = null;
 try {
@@ -69,15 +69,22 @@ try {
 // applies at every level and is kept as-is.
 const body = skillContent.replace(/^---[\s\S]*?---\s*/, '');
 
+const MODE_ORDER = VALID_MODES.filter(m => m !== 'off');
+const modeRank = MODE_ORDER.indexOf(mode);
+
 const filtered = body.split('\n').reduce((acc, line) => {
   const tableRowMatch = line.match(/^\|\s*\*\*(\S+?)\*\*\s*\|/);
   if (tableRowMatch) {
     if (tableRowMatch[1] === mode) acc.push(line);
     return acc;
   }
-  const exampleMatch = line.match(/^- (\S+?):\s/);
+  const exampleMatch = line.match(/^(- )(\S+?):\s/);
   if (exampleMatch) {
-    if (exampleMatch[1] === mode) acc.push(line);
+    const exampleMode = exampleMatch[2];
+    const exampleRank = MODE_ORDER.indexOf(exampleMode);
+    if (exampleRank !== -1 && exampleRank <= modeRank) {
+      acc.push(exampleMatch[1] + line.slice(exampleMatch[0].length));
+    }
     return acc;
   }
   acc.push(line);

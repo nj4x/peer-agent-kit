@@ -65,14 +65,39 @@ make_repo() {
   [[ "$output" != *"| **max** |"* ]]
 }
 
-@test "emits only the active mode's worked examples" {
+@test "emits cumulative examples up to the active mode, without mode prefixes" {
+  echo "full" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
+
+  output="$(run_hook)"
+
+  [[ "$output" == *'"find every call site'* ]]
+  [[ "$output" == *'"implement the three steps'* ]]
+  [[ "$output" != *'"fix the failing tests'* ]]
+  [[ "$output" != *"- lite:"* ]]
+  [[ "$output" != *"- full:"* ]]
+  [[ "$output" != *"- max:"* ]]
+}
+
+@test "lite mode emits only lite examples" {
+  echo "lite" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
+
+  output="$(run_hook)"
+
+  [[ "$output" == *'"find every call site'* ]]
+  [[ "$output" != *'"implement the three steps'* ]]
+  [[ "$output" != *'"fix the failing tests'* ]]
+  [[ "$output" != *"- lite:"* ]]
+}
+
+@test "max mode emits examples from all tiers" {
   echo "max" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
 
   output="$(run_hook)"
 
-  [[ "$output" == *"- max:"* ]]
-  [[ "$output" != *"- lite:"* ]]
-  [[ "$output" != *"- full:"* ]]
+  [[ "$output" == *'"find every call site'* ]]
+  [[ "$output" == *'"implement the three steps'* ]]
+  [[ "$output" == *'"fix the failing tests'* ]]
+  [[ "$output" != *"- max:"* ]]
 }
 
 @test "off mode emits nothing and clears the flag" {
