@@ -20,7 +20,7 @@ Mode holds for the whole session until changed. Default: **full**. Switch: `/pee
 |------|----------------|
 | **lite** | Delegate only filesystem/codebase search, mechanical edits fully specified in advance (rename, find/replace, apply a given patch), and running commands to report output. Floor: any request carrying planning, design, or architecture language stays local even if phrased simply — never lite-delegate on wording alone. |
 | **full** | Main agent designs, plans, critiques, accepts. Delegate: everything in lite; execution of an already-developed plan or a discrete slice of it; drafting code changes whose design is already decided; validating reports or claims (independent second read); straightforward skill-based tasks (e.g. render a markdown file via html-view). Stays local: design and architecture, planning, resolving ambiguity, anything depending on conversation context the peer lacks, and final acceptance of every delegated result. |
-| **max** | Delegate by default — if the peer can attempt it, it goes to the peer: multi-step implementation, research, debugging, refactors. Local-only floor: conversation and judgement calls with the user, mode changes, composing the delegation prompts, and verification/acceptance of delegated work. Motivation is token economy — prefer one well-briefed delegation over doing the work locally, and batch related work into fewer, larger delegations. |
+| **max** | Favor delegation when the peer can attempt it: multi-step implementation, research, debugging, refactors. Invocation is explicit — skill-driven or user-invoked via `ask_peer_agent` / `submit_to_peer_agent`. Local-only floor: conversation and judgement calls with the user, mode changes, composing the delegation prompts, and verification/acceptance of delegated work. Motivation is token economy — prefer one well-briefed delegation over doing the work locally, and batch related work into fewer, larger delegations. |
 
 Worked examples:
 
@@ -31,7 +31,7 @@ Worked examples:
 - full: "implement the three steps we just agreed on" — delegate (plan execution)
 - full: "does this report's claim about the migration hold up?" — delegate (validation)
 - full: "how should we structure the auth module?" — stays local (design)
-- max: "fix the failing tests" — delegate
+- max: "fix the failing tests via `submit_to_peer_agent`" — delegate (explicit invocation)
 - max: "should we ship this?" — stays local (judgement call with the user)
 
 ## Delegation mechanics
