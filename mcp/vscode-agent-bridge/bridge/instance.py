@@ -359,34 +359,52 @@ class InstanceManager:
         if merged != existing:
             settings_path.write_text(json.dumps(merged, indent=2) + "\n")
 
-    def _seed_extensions_dir(self) -> None:
-        """Copy curated extensions into session's isolated extensions dir (ADR-TBD).
+    # Required extensions for a bridge window, keyed by name + prefixes (publisher variants).
+    # cline-sr's two prefixes are alternates (publisher naming varied across releases).
+    _REQUIRED_EXTENSION_PREFIXES = {
+        "companion": ("nj4x.vscode-agent-bridge",),
+        "cline-sr": ("cline-sr.cline-sr", "saoudrizwan.cline-sr"),
+    }
 
-        Per-window isolation prevents conflicts from main profile's extension soup.
-        Seed only the companion bridge extension; all others inherit user-configured
-        extensions via symlink into main dir (symlink approach safer for future use).
+    def _seed_extensions_dir(self) -> dict[str, bool]:
+        """Symlink required extensions into session's isolated extensions dir.
+
+        Per-window isolation (ADR-0071) prevents conflicts; both companion and
+        cline-sr are required for delegation, so both are symlinked from the
+        main profile — symlinks preserve updates without re-seeding. Idempotent
+        and heals broken/stale links. Returns per-extension status so caller can
+        fail fast if either is missing.
         """
         ext_dir = self._data_dir / "extensions"
-        if ext_dir.exists():
-            return  # already seeded
-        main_ext_dir = Path(os.path.expanduser("~/.vscode/extensions"))
-        companion_ext = None
-        if main_ext_dir.is_dir():
-            for entry in main_ext_dir.iterdir():
-                if entry.name.startswith("saoudrizwan.cline-sr"):
-                    companion_ext = entry
-                    break
-        if companion_ext is None:
-            ext_dir.mkdir(parents=True, exist_ok=True)
-            return  # companion extension not yet installed, leave dir empty
         ext_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            dst = ext_dir / companion_ext.name
+        main_ext_dir = Path(os.path.expanduser("~/.vscode/extensions"))
+        main_entries = list(main_ext_dir.iterdir()) if main_ext_dir.is_dir() else []
+        result = {name: False for name in self._REQUIRED_EXTENSION_PREFIXES}
+        for name, prefixes in self._REQUIRED_EXTENSION_PREFIXES.items():
+            match = next(
+                (e for e in main_entries if e.name.startswith(prefixes)),
+                None,
+            )
+            if match is None:
+                logger.warning("required extension not found in %s (prefixes=%s)", main_ext_dir, prefixes)
+                continue
+            dst = ext_dir / match.name
+            # Heal stale/broken symlinks: if already exists but is a broken link, remove it
+            if dst.is_symlink() and not dst.exists():
+                try:
+                    dst.unlink()
+                except OSError as exc:
+                    logger.warning("failed to remove stale symlink %s (continuing): %s", dst, exc)
+                    continue
             if dst.exists():
-                return  # already linked/copied
-            shutil.copytree(companion_ext, dst, symlinks=True, dirs_exist_ok=False)
-        except Exception as exc:  # noqa: BLE001 - best-effort, non-blocking
-            logger.warning("extensions dir seed failed (continuing): %s", exc)
+                result[name] = True
+                continue  # already linked correctly
+            try:
+                dst.symlink_to(match)
+                result[name] = True
+            except OSError as exc:
+                logger.warning("failed to seed extension %s (continuing): %s", match.name, exc)
+        return result
 
     async def ensure_ready(self, workspace: str, port: int) -> None:
         """Spawn or reuse the dedicated window so `workspace` is open in it.
@@ -419,7 +437,13 @@ class InstanceManager:
             self._create_config_symlink()
             self._copy_template_profile()
             self._seed_settings()
-            self._seed_extensions_dir()
+            ext_status = self._seed_extensions_dir()
+            missing = [name for name, seeded in ext_status.items() if not seeded]
+            if missing:
+                raise InstanceUnreachable(
+                    f"required extensions not found in ~/.vscode/extensions: {', '.join(missing)} — "
+                    "install them before delegating"
+                )
         # Every spawn/reuse open reloads the window, which re-reads the target
         # folder's workspaceStorage — seed it first if unseen (ADR-0078).
         self._seed_workspace_layout(workspace_resolved)

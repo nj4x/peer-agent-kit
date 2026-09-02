@@ -45,6 +45,12 @@ def tmp_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(os.path, "expanduser", _fake_expanduser)
     monkeypatch.setattr(bridge.instance, "CANONICAL_CONFIG_DIR", tmp_path / "canonical")
     monkeypatch.setattr(bridge.instance, "TEMPLATE_USER_DIR", tmp_path / "template" / "User")
+    # Fake main-profile extensions so ensure_ready's fail-fast (cline-sr missing)
+    # doesn't trip unrelated tests; test_seed_extensions_dir_* cover the seeding
+    # logic itself, including the missing-extension case.
+    main_ext_dir = tmp_path / ".vscode" / "extensions"
+    (main_ext_dir / "nj4x.vscode-agent-bridge-0.1.0").mkdir(parents=True)
+    (main_ext_dir / "cline-sr.cline-sr-1.25.1").mkdir(parents=True)
     return tmp_path
 
 
@@ -428,6 +434,111 @@ async def test_ensure_ready_skips_symlink_and_reseed_on_reuse(fake_spawn, tmp_da
     await task
 
     assert calls == []  # already-wired session: no re-link, no re-seed on window reuse
+
+
+def _main_ext_dir(tmp_data_dir: Path) -> Path:
+    return tmp_data_dir / ".vscode" / "extensions"
+
+
+def test_seed_extensions_dir_symlinks_companion_and_cline_sr(tmp_data_dir):
+    manager = InstanceManager()
+
+    seeded = manager._seed_extensions_dir()
+
+    ext_dir = manager._data_dir / "extensions"
+    companion_link = ext_dir / "nj4x.vscode-agent-bridge-0.1.0"
+    cline_sr_link = ext_dir / "cline-sr.cline-sr-1.25.1"
+    assert seeded == {"companion": True, "cline-sr": True}
+    assert companion_link.is_symlink()
+    assert companion_link.resolve() == (_main_ext_dir(tmp_data_dir) / "nj4x.vscode-agent-bridge-0.1.0").resolve()
+    assert cline_sr_link.is_symlink()
+    assert cline_sr_link.resolve() == (_main_ext_dir(tmp_data_dir) / "cline-sr.cline-sr-1.25.1").resolve()
+
+
+def test_seed_extensions_dir_matches_saoudrizwan_naming_variant(tmp_data_dir):
+    main_ext_dir = _main_ext_dir(tmp_data_dir)
+    shutil.rmtree(main_ext_dir / "cline-sr.cline-sr-1.25.1")
+    (main_ext_dir / "saoudrizwan.cline-sr-1.0.0").mkdir(parents=True)
+    manager = InstanceManager()
+
+    seeded = manager._seed_extensions_dir()
+
+    assert seeded["cline-sr"] is True
+    link = manager._data_dir / "extensions" / "saoudrizwan.cline-sr-1.0.0"
+    assert link.is_symlink()
+
+
+def test_seed_extensions_dir_heals_previously_empty_dir(tmp_data_dir):
+    manager = InstanceManager()
+    ext_dir = manager._data_dir / "extensions"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "extensions.json").write_text("[]")
+
+    seeded = manager._seed_extensions_dir()
+
+    assert seeded == {"companion": True, "cline-sr": True}
+    assert (ext_dir / "cline-sr.cline-sr-1.25.1").is_symlink()
+
+
+def test_seed_extensions_dir_idempotent(tmp_data_dir):
+    manager = InstanceManager()
+
+    first = manager._seed_extensions_dir()
+    second = manager._seed_extensions_dir()
+
+    assert first == {"companion": True, "cline-sr": True}
+    assert second == {"companion": True, "cline-sr": True}
+    assert (manager._data_dir / "extensions" / "cline-sr.cline-sr-1.25.1").is_symlink()
+
+
+def test_seed_extensions_dir_missing_cline_sr_returns_false(tmp_data_dir):
+    shutil.rmtree(_main_ext_dir(tmp_data_dir) / "cline-sr.cline-sr-1.25.1")
+    manager = InstanceManager()
+
+    seeded = manager._seed_extensions_dir()
+
+    assert seeded == {"companion": True, "cline-sr": False}
+    ext_dir = manager._data_dir / "extensions"
+    assert ext_dir.is_dir()  # dir still created, just missing cline-sr
+    assert (ext_dir / "nj4x.vscode-agent-bridge-0.1.0").is_symlink()
+
+
+def test_seed_extensions_dir_missing_main_dir_entirely(tmp_data_dir):
+    shutil.rmtree(_main_ext_dir(tmp_data_dir))
+    manager = InstanceManager()
+
+    seeded = manager._seed_extensions_dir()
+
+    assert seeded == {"companion": False, "cline-sr": False}
+    assert (manager._data_dir / "extensions").is_dir()
+
+
+async def test_ensure_ready_raises_when_cline_sr_missing(tmp_data_dir, fake_spawn):
+    shutil.rmtree(_main_ext_dir(tmp_data_dir) / "cline-sr.cline-sr-1.25.1")
+    manager = InstanceManager()
+
+    with pytest.raises(InstanceUnreachable, match="required extensions"):
+        await manager.ensure_ready("/tmp/repo", port=4321)
+
+    assert fake_spawn == []  # fails before spawning `code` at all
+
+
+def test_seed_extensions_dir_heals_broken_symlink(tmp_data_dir):
+    manager = InstanceManager()
+    ext_dir = manager._data_dir / "extensions"
+    ext_dir.mkdir(parents=True)
+    # Create a broken symlink (target doesn't exist)
+    broken_link = ext_dir / "cline-sr.cline-sr-1.25.1"
+    broken_link.symlink_to(Path("/nonexistent"))
+    assert broken_link.is_symlink() and not broken_link.exists()
+
+    seeded = manager._seed_extensions_dir()
+
+    # Symlink should be healed (replaced with working link)
+    assert seeded["cline-sr"] is True
+    assert broken_link.is_symlink()
+    assert broken_link.exists()
+    assert broken_link.resolve() == (_main_ext_dir(tmp_data_dir) / "cline-sr.cline-sr-1.25.1").resolve()
 
 
 async def test_ensure_ready_propagates_symlink_error(fake_spawn, tmp_data_dir, monkeypatch):
