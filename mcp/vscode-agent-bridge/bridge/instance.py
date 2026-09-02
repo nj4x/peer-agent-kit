@@ -359,6 +359,35 @@ class InstanceManager:
         if merged != existing:
             settings_path.write_text(json.dumps(merged, indent=2) + "\n")
 
+    def _seed_extensions_dir(self) -> None:
+        """Copy curated extensions into session's isolated extensions dir (ADR-TBD).
+
+        Per-window isolation prevents conflicts from main profile's extension soup.
+        Seed only the companion bridge extension; all others inherit user-configured
+        extensions via symlink into main dir (symlink approach safer for future use).
+        """
+        ext_dir = self._data_dir / "extensions"
+        if ext_dir.exists():
+            return  # already seeded
+        main_ext_dir = Path(os.path.expanduser("~/.vscode/extensions"))
+        companion_ext = None
+        if main_ext_dir.is_dir():
+            for entry in main_ext_dir.iterdir():
+                if entry.name.startswith("saoudrizwan.cline-sr"):
+                    companion_ext = entry
+                    break
+        if companion_ext is None:
+            ext_dir.mkdir(parents=True, exist_ok=True)
+            return  # companion extension not yet installed, leave dir empty
+        ext_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            dst = ext_dir / companion_ext.name
+            if dst.exists():
+                return  # already linked/copied
+            shutil.copytree(companion_ext, dst, symlinks=True, dirs_exist_ok=False)
+        except Exception as exc:  # noqa: BLE001 - best-effort, non-blocking
+            logger.warning("extensions dir seed failed (continuing): %s", exc)
+
     async def ensure_ready(self, workspace: str, port: int) -> None:
         """Spawn or reuse the dedicated window so `workspace` is open in it.
 
@@ -381,7 +410,7 @@ class InstanceManager:
         # (Note: is_relative_to also returns True for exact equality, so no separate
         # exact-match guard is needed — the branch above already handles it.)
         self._connected.clear()
-        args = [self._code_bin, "--user-data-dir", str(self._data_dir)]
+        args = [self._code_bin, "--user-data-dir", str(self._data_dir), "--extensions-dir", str(self._data_dir / "extensions")]
         if self._alive:
             args.append("--reuse-window")
         args.append(str(workspace_resolved))
@@ -390,6 +419,7 @@ class InstanceManager:
             self._create_config_symlink()
             self._copy_template_profile()
             self._seed_settings()
+            self._seed_extensions_dir()
         # Every spawn/reuse open reloads the window, which re-reads the target
         # folder's workspaceStorage — seed it first if unseen (ADR-0078).
         self._seed_workspace_layout(workspace_resolved)
