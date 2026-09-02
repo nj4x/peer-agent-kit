@@ -31,7 +31,7 @@ Worked examples:
 - full: "implement the three steps we just agreed on" — delegate (plan execution)
 - full: "does this report's claim about the migration hold up?" — delegate (validation)
 - full: "how should we structure the auth module?" — stays local (design)
-- max: "fix the failing tests via `submit_to_peer_agent`" — delegate (explicit invocation)
+- max: "fix the failing tests" — delegate (explicit invocation)
 - max: "should we ship this?" — stays local (judgement call with the user)
 
 ## Delegation mechanics

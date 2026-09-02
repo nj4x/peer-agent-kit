@@ -1,90 +1,105 @@
 #!/usr/bin/env bats
-# bats-core tests for peer-agent-activate.js hook output
+# bats-core tests for peer-agent-activate.js hook output.
+#
+# The hook takes no arguments: it reads the session's cwd from stdin JSON and
+# resolves the mode flag from the repo-scoped file, then the global one.
 
 setup() {
   export HOME="$(mktemp -d)"
   export CLAUDE_CONFIG_DIR="$HOME/.claude"
   export KIT_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
+  export CLAUDE_PLUGIN_ROOT="$KIT_DIR"
 
   mkdir -p "$CLAUDE_CONFIG_DIR"
-  mkdir -p "$HOME/.claude/projects"
-
-  # Node stub for testing
-  export PATH="$KIT_DIR/tests/stubs:$PATH"
 }
 
 teardown() {
   rm -rf "$HOME"
 }
 
-# Test 1: mode file not found, should fall back to global default
-@test "peer-agent-activate.js falls back to global default when repo mode file missing" {
-  # Create global default flag file pointing to 'full' mode
-  mkdir -p "$HOME/.claude"
-  echo "full" > "$HOME/.claude/.peer-agent-active"
-
-  # Run hook with repo-scoped flag file path (doesn't exist)
-  output=$(node "$KIT_DIR/hooks/peer-agent-activate.js" 2>&1)
-
-  # Should emit PEER_AGENT MODE ACTIVE banner
-  [[ "$output" == *"PEER_AGENT MODE ACTIVE"* ]]
-
-  # Should include 'full' mode rules (from SKILL.md)
-  [[ "$output" == *"Delegate"* ]] # full mode includes execution language
+# Runs the hook with the given cwd on stdin. No cwd argument means no stdin
+# payload, which exercises the global-flag fallback path.
+run_hook() {
+  if [ "$#" -eq 0 ]; then
+    printf '{}' | node "$KIT_DIR/hooks/peer-agent-activate.js" 2>&1
+  else
+    printf '{"cwd":"%s"}' "$1" | node "$KIT_DIR/hooks/peer-agent-activate.js" 2>&1
+  fi
 }
 
-# Test 2: repo-scoped mode file takes precedence
-@test "peer-agent-activate.js prefers repo-scoped mode file over global" {
-  mkdir -p "$HOME/.claude/projects/test-repo/.claude"
-  echo "max" > "$HOME/.claude/projects/test-repo/.claude/.peer-agent-mode"
-  echo "full" > "$HOME/.claude/.peer-agent-active"
-
-  output=$(node "$KIT_DIR/hooks/peer-agent-activate.js" \
-    "$HOME/.claude/projects/test-repo/.claude/.peer-agent-mode" 2>&1)
-
-  # Should emit max mode banner
-  [[ "$output" == *"PEER_AGENT MODE ACTIVE"* ]]
-  [[ "$output" == *"level: max"* ]]
+# Creates a git repo with a .claude/ dir holding the given mode, echoes its path.
+make_repo() {
+  local root="$HOME/repo"
+  mkdir -p "$root/.claude"
+  git -C "$root" init -q
+  echo "$1" > "$root/.claude/.peer-agent-mode"
+  echo "$root"
 }
 
-# Test 3: 'off' mode produces minimal output
-@test "peer-agent-activate.js respects 'off' mode" {
-  echo "off" > "$HOME/.claude/.peer-agent-active"
+@test "falls back to the global flag when no repo-scoped file exists" {
+  echo "full" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
 
-  output=$(node "$KIT_DIR/hooks/peer-agent-activate.js" 2>&1)
+  output="$(run_hook)"
 
-  # Should still emit mode banner
-  [[ "$output" == *"PEER_AGENT MODE ACTIVE"* ]]
-  [[ "$output" == *"level: off"* ]]
-
-  # Should NOT include delegation rules
-  [[ ! "$output" =~ Delegate\ by\ (default|policy) ]]
+  [[ "$output" == *"PEER_AGENT MODE ACTIVE — level: full"* ]]
+  [[ "$output" == *"| **full** |"* ]]
 }
 
-# Test 4: all modes present in output when cycling through them
-@test "peer-agent-activate.js loads all modes from SKILL.md" {
-  for mode in off lite full max; do
-    echo "$mode" > "$HOME/.claude/.peer-agent-active"
-    output=$(node "$KIT_DIR/hooks/peer-agent-activate.js" 2>&1)
+@test "prefers the repo-scoped flag over the global one" {
+  echo "full" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
+  repo="$(make_repo max)"
 
-    # Verify banner is always present
-    [[ "$output" == *"PEER_AGENT MODE ACTIVE"* ]]
-    [[ "$output" == *"level: $mode"* ]]
+  output="$(run_hook "$repo")"
+
+  [[ "$output" == *"PEER_AGENT MODE ACTIVE — level: max"* ]]
+  [[ "$output" == *"| **max** |"* ]]
+}
+
+@test "emits only the active mode's table row" {
+  echo "lite" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
+
+  output="$(run_hook)"
+
+  [[ "$output" == *"| **lite** |"* ]]
+  [[ "$output" != *"| **full** |"* ]]
+  [[ "$output" != *"| **max** |"* ]]
+}
+
+@test "emits only the active mode's worked examples" {
+  echo "max" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
+
+  output="$(run_hook)"
+
+  [[ "$output" == *"- max:"* ]]
+  [[ "$output" != *"- lite:"* ]]
+  [[ "$output" != *"- full:"* ]]
+}
+
+@test "off mode emits nothing and clears the flag" {
+  echo "off" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
+
+  output="$(run_hook)"
+
+  [ -z "$output" ]
+  [ ! -f "$CLAUDE_CONFIG_DIR/.peer-agent-active" ]
+}
+
+@test "every mode is resolvable from the global flag" {
+  for mode in lite full max; do
+    echo "$mode" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
+
+    output="$(run_hook)"
+
+    [[ "$output" == *"PEER_AGENT MODE ACTIVE — level: $mode"* ]]
   done
 }
 
-# Test 5: missing SKILL.md fails gracefully
-@test "peer-agent-activate.js fails with clear error if SKILL.md missing" {
-  echo "full" > "$HOME/.claude/.peer-agent-active"
+@test "reports the skill path on stderr when SKILL.md is unreadable" {
+  echo "full" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
+  export CLAUDE_PLUGIN_ROOT="$HOME/absent"
 
-  # Temporarily hide SKILL.md
-  mv "$KIT_DIR/skills/peer-agent/SKILL.md" "$KIT_DIR/skills/peer-agent/SKILL.md.bak"
+  output="$(run_hook)"
 
-  output=$(node "$KIT_DIR/hooks/peer-agent-activate.js" 2>&1)
-
-  # Should emit error, not partial/broken output
-  [[ "$output" == *"error"* ]] || [[ "$output" == *"Error"* ]] || [[ "$output" == *"not found"* ]]
-
-  # Restore
-  mv "$KIT_DIR/skills/peer-agent/SKILL.md.bak" "$KIT_DIR/skills/peer-agent/SKILL.md"
+  [[ "$output" == *"could not read"* ]]
+  [[ "$output" == *"SKILL.md"* ]]
 }

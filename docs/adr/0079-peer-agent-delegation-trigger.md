@@ -1,4 +1,6 @@
 ---
+artifact-type: adr
+lineage-rules: exempt
 title: Peer-agent delegation trigger model
 status: accepted
 date: 2026-09-01
@@ -6,6 +8,9 @@ authors: Roman Herasymenko
 ---
 
 # ADR-0079: Peer-agent delegation trigger model
+
+Lineage is exempt: this ADR records a delegation-policy decision about the kit's
+own authoring workflow, not a behavior any SRS item governs.
 
 ## Context
 
@@ -25,14 +30,14 @@ The peer-agent skill enables Claude Code sessions to delegate work to cline-sr r
 
 4. **Option B (explicit opt-in via `tools` parameter) lacks Claude Code support.** No evidence exists that Claude Code's `Agent()` tool accepts caller-supplied `tools` or `mcpServers` overrides at spawn time. This was inspired by DeepAgents but is not confirmed for Claude Code.
 
-5. **Subagents run in separate sessions and need explicit injection.** Research (#23) confirmed subagents spawn as fresh sessions (separate JSONL files). SessionStart hook runs in the parent session only, so subagents never receive injected policy. Issue #24 decided: subagents should receive identical injection via SubagentStart hook (already exists in Claude Code as of v2.2.x).
+5. **Subagents run in separate sessions and need explicit injection.** Research (#23) confirmed subagents spawn as fresh sessions (separate JSONL files). SessionStart hook runs in the parent session only, so subagents never receive injected policy. Issue #24 decided: subagents should receive identical injection via the SubagentStart hook, which Claude Code added in v2.0.43 (`~/.claude/cache/changelog.md`) and fixed in v2.1.141.
 
 ## Decision
 
 **Unified injection approach: SessionStart + SubagentStart, no explicit opt-in layer.**
 
 - Top-level sessions receive mode policy injection at SessionStart.
-- Subagents receive identical mode policy injection at SubagentStart (per ADR-0024 implementation).
+- Subagents receive identical mode policy injection at SubagentStart (per the Issue #24 design).
 - No new enforcement mechanism (e.g., PreToolUse nudge) is added.
 - No explicit opt-in layer for subagent spawning; injection is the sole propagation mechanism.
 
@@ -43,14 +48,14 @@ The peer-agent skill enables Claude Code sessions to delegate work to cline-sr r
 - Users and skills invoke `ask_peer_agent` / `submit_to_peer_agent` by explicit choice, guided by the injected policy documentation.
 - Subagents inherit the parent session's active mode and receive the same injection, but do not override parent behavior — they make their own invocation decisions within the injected policy.
 
-**SKILL.md reframe (max-mode, line 23):**
-- Before: "Delegate by default — if the peer can attempt it, it goes to the peer."
-- After: "Delegate by policy when invoked; tool available for qualifying tasks. Skill or user explicitly calls `ask_peer_agent` / `submit_to_peer_agent`."
+**SKILL.md reframe (§ Modes, the `**max**` table row):**
+- Before: "Delegate by default — if the peer can attempt it, it goes to the peer: multi-step implementation, research, debugging, refactors."
+- After: "Favor delegation when the peer can attempt it: multi-step implementation, research, debugging, refactors. Invocation is explicit — skill-driven or user-invoked via `ask_peer_agent` / `submit_to_peer_agent`."
 
 **Implementation:**
 - No code changes to SessionStart injection (already working).
 - Implement SubagentStart hook registration in install.sh / uninstall.sh (single marker couples both hooks, per #24 design).
-- Update SKILL.md line 23 to reflect the documented limitation.
+- Update the `**max**` row in SKILL.md § Modes to reflect the documented limitation.
 - No changes to bridge, extension, or MCP server contracts.
 
 ## Rationale
