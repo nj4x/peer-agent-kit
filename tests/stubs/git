@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Stub git for update.sh tests
+# Handles: fetch, symbolic-ref, rev-parse, pull, -C <dir> forms
+
+# Parse arguments - handle -C <dir> prefix
+args=("$@")
+shift_idx=0
+while [[ "${args[$shift_idx]}" == "-C" ]]; do
+  shift_idx=$((shift_idx + 2))
+done
+cmd="${args[$shift_idx]}"
+
+case "$cmd" in
+  fetch)
+    # git fetch origin - always succeeds
+    exit 0
+    ;;
+  symbolic-ref)
+    # git symbolic-ref refs/remotes/origin/HEAD
+    if [[ "$*" == "refs/remotes/origin/HEAD" ]]; then
+      echo "refs/remotes/origin/main"
+      exit 0
+    fi
+    exit 1
+    ;;
+  rev-parse)
+    # git rev-parse origin/main or git rev-parse HEAD
+    if [[ "$*" == *"origin/main"* ]]; then
+      echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      exit 0
+    elif [[ "$*" == *"HEAD"* ]]; then
+      echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      exit 0
+    fi
+    exit 1
+    ;;
+  pull)
+    # git pull origin main --ff-only
+    # Check for FAIL_PULL env var to simulate failure
+    if [[ "${FAIL_PULL:-}" == "1" ]]; then
+      echo "error: cannot pull with --ff-only" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac

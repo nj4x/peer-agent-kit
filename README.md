@@ -30,6 +30,13 @@ Environment overrides:
 ./install.sh --no-install-skill # skips the peer-agent skill install (bring your own)
 ```
 
+To update:
+
+```bash
+~/.local/share/peer-agent-kit/update.sh   # quick-install path
+./update.sh                               # manual-clone path
+```
+
 To revert:
 
 ```bash

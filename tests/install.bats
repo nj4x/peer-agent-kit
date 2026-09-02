@@ -15,6 +15,10 @@ setup() {
   # Get the repo root (parent of tests/)
   export KIT_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
   
+  # Fix #2: Create per-test isolated stub directory to avoid mutating tracked files
+  export TEST_STUBS_DIR="$HOME/test-stubs"
+  mkdir -p "$TEST_STUBS_DIR"
+  
   # Pre-seed minimal Claude Code configuration
   mkdir -p "$CLAUDE_CONFIG_DIR"
   echo '{}' > "$CLAUDE_CONFIG_DIR/settings.json"
@@ -35,11 +39,11 @@ setup() {
   
   # Stub node to avoid real npm/uv operations in tests
   # We only test file layout, not dependency installation
-  export PATH="$KIT_DIR/tests/stubs:$PATH"
-  mkdir -p "$KIT_DIR/tests/stubs"
+  # Fix #2: Use per-test isolated stub directory instead of tracked location
+  export PATH="$TEST_STUBS_DIR:$PATH"
   
   # Create stub scripts that simulate successful operations without side effects
-  cat > "$KIT_DIR/tests/stubs/node" <<'STUB'
+  cat > "$TEST_STUBS_DIR/node" <<'STUB'
 #!/usr/bin/env bash
 # Stub node that handles the specific invocations from install.sh and uninstall.sh
 
@@ -70,7 +74,7 @@ fi
 # Default: succeed silently
 exit 0
 STUB
-  chmod +x "$KIT_DIR/tests/stubs/node"
+  chmod +x "$TEST_STUBS_DIR/node"
   
   cat > "$KIT_DIR/tests/stubs/npm" <<'STUB'
 #!/usr/bin/env bash
@@ -127,6 +131,7 @@ teardown() {
   [ -f "$HOME/.peer-agent-kit/manifest.json" ]
   grep -q '"completed": *true' "$HOME/.peer-agent-kit/manifest.json"
   grep -q "\"claudeDir\": \"$CLAUDE_CONFIG_DIR\"" "$HOME/.peer-agent-kit/manifest.json"
+  grep -q '"kitSha"' "$HOME/.peer-agent-kit/manifest.json"
 }
 
 @test "re-running install.sh after successful install fails with already installed" {

@@ -431,6 +431,15 @@ if [ ! -f "$TEMPLATE_USER_SETTINGS" ]; then
 fi
 
 # --- Final manifest write (completed: true) ---------------------------------
+
+# Compute kitSha for the manifest (kitSha field per ADR 0081)
+KIT_SHA="$(git -C "$KIT_DIR" rev-parse HEAD 2>/dev/null || echo "null")"
+if [ "$KIT_SHA" = "null" ]; then
+  KIT_SHA_JSON="null"
+else
+  KIT_SHA_JSON="\"$KIT_SHA\""
+fi
+
 cat > "$KIT_HOME/manifest.json" <<JSON
 {
   "installedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
@@ -442,6 +451,7 @@ cat > "$KIT_HOME/manifest.json" <<JSON
   "pluginRoot": "$PLUGIN_ROOT",
   "skillInstalledByKit": $SKILL_INSTALLED_BY_KIT,
   "skillBackup": $SKILL_BACKUP_JSON,
+  "kitSha": $KIT_SHA_JSON,
   "completed": true
 }
 JSON
