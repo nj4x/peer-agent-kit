@@ -2,7 +2,7 @@
 # peer-agent-kit installer.
 #
 # Registers the vscode-agent-bridge MCP server, installs the VS Code extension,
-# injects hook entries (SessionStart, UserPromptSubmit) into settings.json,
+# injects hook entries (SessionStart, SubagentStart, UserPromptSubmit) into settings.json,
 # and patches statusline.sh with a peer-agent badge. Everything touched is
 # backed up under ~/.peer-agent-kit/backup/ so uninstall.sh can restore it
 # exactly (byte-for-byte for settings/statusline, by removing for MCP/extension).

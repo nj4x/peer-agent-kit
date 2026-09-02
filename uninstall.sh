@@ -3,8 +3,8 @@
 #
 # Surgically removes peer-agent-kit entries from settings.json and statusline.sh
 # using marker-based detection (not byte-exact restore from backups):
-# - settings.json: removes hook entries containing 'peer-agent-activate.js' and
-#   'peer-agent-mode-tracker.js' via lib/settings-unpatch.js
+# - settings.json: removes hook entries containing 'peer-agent-activate.js' (SessionStart, SubagentStart) and
+#   'peer-agent-mode-tracker.js' (UserPromptSubmit) via lib/settings-unpatch.js
 # - statusline.sh: removes the block between '# PEER_AGENT-KIT BEGIN' and
 #   '# PEER_AGENT-KIT END' via lib/statusline-unpatch.js
 # ~/.claude.json is the mutable state store, so it is restored surgically:
