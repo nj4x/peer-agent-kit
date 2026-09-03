@@ -40,6 +40,7 @@ class Record:
     cline_task_id: str | None = None
     signal_event: asyncio.Event = field(default_factory=asyncio.Event)
     dispatch_at: float | None = None
+    summary: str | None = None
 
 
 class BridgeQueue:
@@ -48,8 +49,8 @@ class BridgeQueue:
         self._records: dict[str, Record] = {}
         self._in_flight: Record | None = None
 
-    def submit(self, question: str, workspace: str) -> Record:
-        record = Record(id=uuid.uuid4().hex, question=question, workspace=workspace)
+    def submit(self, question: str, workspace: str, summary: str | None = None) -> Record:
+        record = Record(id=uuid.uuid4().hex, question=question, workspace=workspace, summary=summary)
         self._records[record.id] = record
         self._pending.append(record)
         logger.info("task submitted: id=%s workspace=%s", record.id, workspace)

@@ -47,7 +47,7 @@ def _bridge(ctx: Context) -> Bridge:
 
 
 @mcp.tool()
-async def submit_to_peer_agent(question: str, workspace: str, ctx: Context) -> dict:
+async def submit_to_peer_agent(question: str, workspace: str, ctx: Context, summary: str | None = None) -> dict:
     """Ask cline-sr a question without waiting for the answer.
 
     Reaches a dedicated VS Code window running cline-sr. It works as a
@@ -61,11 +61,20 @@ async def submit_to_peer_agent(question: str, workspace: str, ctx: Context) -> d
     the answer later with `poll_peer_agent`. Submit several questions before
     polling any — each waits its turn behind whatever is already in flight.
 
+    Args:
+        question: The task question/prompt.
+        workspace: Path to the workspace directory.
+        summary: Optional one-line human-readable task summary (ADR-0086).
+                 When the prompt is offloaded to a brief file (over the encoded-length
+                 threshold), it's prepended to the pointer prompt shown in the foreground.
+                 Ignored for inline (non-offloaded) dispatch. Capped at 600 encoded chars,
+                 truncated with ' ...' if longer.
+
     Returns {handle, status, reason}. `status` is always "submitted"; keep
     the `handle` to poll. A request nobody answers within 30 minutes expires,
     and polling it then reports failed with reason timeout.
     """
-    return await _bridge(ctx).submit(question, workspace)
+    return await _bridge(ctx).submit(question, workspace, summary)
 
 
 def _poll_timeout_default() -> float | None:

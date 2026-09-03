@@ -1,6 +1,6 @@
 import asyncio
 
-from bridge.queue import ANSWERED, DISPATCHED, FAILED, QUEUED, BridgeQueue
+from bridge.queue import ANSWERED, DISPATCHED, FAILED, QUEUED, BridgeQueue, Record
 
 
 def test_submit_starts_queued():
@@ -8,6 +8,26 @@ def test_submit_starts_queued():
     record = queue.submit("question", "/tmp")
     assert record.status == QUEUED
     assert queue.get(record.id) is record
+
+
+def test_submit_with_summary_stores_summary():
+    """BridgeQueue.submit stores summary on Record when provided."""
+    queue = BridgeQueue()
+    record = queue.submit("question", "/tmp", summary="Task summary here")
+    assert record.summary == "Task summary here"
+
+
+def test_submit_without_summary_defaults_to_none():
+    """BridgeQueue.submit defaults summary to None when not provided."""
+    queue = BridgeQueue()
+    record = queue.submit("question", "/tmp")
+    assert record.summary is None
+
+
+def test_record_summary_field_defaults_to_none():
+    """Record dataclass has summary field defaulting to None."""
+    record = Record(id="test-id", question="q", workspace="/tmp")
+    assert record.summary is None
 
 
 def test_next_dispatchable_marks_in_flight():
@@ -463,7 +483,7 @@ def test_poll_activity_live_when_tool_fired(monkeypatch):
     # Fast-forward time 60s (well past 30s stale threshold)
     current_time = 1060.0
 
-    # Activity should still be "live" because tool_uses increased since baseline
+    # Activity should still be 'live' because tool_uses increased since baseline
     response = bridge.poll(record.id, baseline_tool_uses=baseline)
     assert response["activity"] == "live"
     assert response["tool_uses"] == 1

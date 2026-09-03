@@ -36,6 +36,9 @@ BRIEF_WARN_BYTES = 50 * 1024
 # urllib.parse.quote already leaves unescaped by default (ADR-0077 ID-011).
 _ENCODE_URI_COMPONENT_SAFE = "!'()*-._~"
 
+# Encoded-length cap for summary prefix (ADR-0086).
+SUMMARY_ENCODED_CAP = 600
+
 
 def _async_timeout() -> float:
     return float(os.getenv("BRIDGE_ASYNC_TIMEOUT", "1800"))
@@ -114,9 +117,14 @@ def _prepare_dispatch_prompt(record: Record) -> str:
     written (including a lone-surrogate question that can't be UTF-8
     encoded); the caller treats that as a fatal dispatch prerequisite, not
     best-effort.
+    
+    When offloading and record.summary is truthy, prepends the summary to the
+    pointer prompt (ADR-0086). For inline dispatch (under threshold), summary
+    is silently discarded.
     """
     question = record.question
     if _encoded_length(question) <= ENCODED_BRIEF_THRESHOLD:
+        # Inline dispatch: summary is silently discarded per ADR-0086
         return question
 
     briefs_dir = _briefs_dir()
@@ -135,10 +143,53 @@ def _prepare_dispatch_prompt(record: Record) -> str:
             brief_path, BRIEF_WARN_BYTES, size,
         )
 
+    # ADR-0086: prepend summary if present and truthy
+    if record.summary:
+        return f"{record.summary}. Your full task brief is at `{brief_path}` — read it first, then proceed."
     return f"Your full task brief is at `{brief_path}` — read it first, then proceed."
 
 
+def _validate_summary(summary: str | None) -> str | None:
+    """Validate and optionally truncate summary to fit within SUMMARY_ENCODED_CAP encoded chars (ADR-0086).
+    
+    Returns None if summary is None. Returns unchanged summary if encoded length <= SUMMARY_ENCODED_CAP.
+    If over, truncates raw characters from the end until encoded length of 
+    summary + " ..." is <= SUMMARY_ENCODED_CAP, then returns summary + " ...".
+    """
+    if summary is None:
+        return None
+    
+    # Strip whitespace to prevent prompts like "   . Your full task brief..."
+    summary = summary.strip()
+    if not summary:
+        return None
+    
+    # Check if summary fits within the encoded limit
+    if _encoded_length(summary) <= SUMMARY_ENCODED_CAP:
+        return summary
+    
+    # Truncate with ellipsis - need to find the right truncation point
+    # The ellipsis " ..." encodes to " ..." (6 encoded chars: %20 for space + 3 dots)
+    ellipsis = " ..."
+    ellipsis_encoded_len = _encoded_length(ellipsis)
+    max_encoded_with_ellipsis = SUMMARY_ENCODED_CAP
+    
+    # Binary search for the right truncation point
+    # Account for ellipsis in the loop bound
+    left, right = 0, len(summary)
+    while left < right:
+        mid = (left + right + 1) // 2
+        truncated = summary[:mid] + ellipsis
+        if _encoded_length(truncated) <= max_encoded_with_ellipsis:
+            left = mid
+        else:
+            right = mid - 1
+    
+    return summary[:left] + ellipsis
+
+
 def _validate(question: str, workspace: str) -> str:
+    """Validate question and workspace, returning validated question."""
     question = question.strip()
     if not question:
         raise ValueError("question must not be empty")
@@ -211,10 +262,21 @@ class Bridge:
         set_task_id(None)
         await self._pump(async_timeout)
 
-    async def submit(self, question: str, workspace: str) -> dict:
-        """Submit a question without waiting; returns a pollable handle."""
+    async def submit(self, question: str, workspace: str, summary: str | None = None) -> dict:
+        """Submit a question without waiting; returns a pollable handle.
+        
+        Args:
+            question: The task question/prompt.
+            workspace: Path to the workspace directory.
+            summary: Optional one-line human-readable task summary (ADR-0086).
+                     When the prompt is offloaded to a brief file (over the encoded-length
+                     threshold), it's prepended to the pointer prompt shown in the foreground.
+                     Ignored for inline (non-offloaded) dispatch. Capped at 600 encoded chars,
+                     truncated with ' ...' if longer.
+        """
         question = _validate(question, workspace)
-        record = self.queue.submit(question, workspace)
+        validated_summary = _validate_summary(summary)
+        record = self.queue.submit(question, workspace, validated_summary)
         set_task_id(record.id)
         await self._pump(_async_timeout())
         return {"handle": record.id, "status": "submitted", "reason": None}

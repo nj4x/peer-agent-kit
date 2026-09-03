@@ -1,10 +1,22 @@
 import asyncio
+import tempfile
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from bridge.bridge import Bridge
+from bridge.bridge import (
+    BRIEF_WARN_BYTES,
+    ENCODED_BRIEF_THRESHOLD,
+    SUMMARY_ENCODED_CAP,
+    _encoded_length,
+    _exclude_workspace_rag,
+    _prepare_dispatch_prompt,
+    _validate_summary,
+    Bridge,
+)
 from bridge.logsetup import task_id_var
+from bridge.queue import BridgeQueue, Record, DISPATCHED
 
 
 @pytest.fixture
@@ -121,7 +133,6 @@ def test_latest_vscode_exthost_dir_picks_latest(tmp_path, monkeypatch):
 
 
 # Tests for _exclude_workspace_rag
-from bridge.bridge import _exclude_workspace_rag
 
 
 def test_exclude_workspace_rag_fresh_repo(tmp_path):
@@ -237,14 +248,6 @@ def test_exclude_workspace_rag_entry_without_trailing_slash(tmp_path):
 
 
 # Tests for ADR-0077 brief-file offload
-
-from bridge.bridge import (
-    BRIEF_WARN_BYTES,
-    ENCODED_BRIEF_THRESHOLD,
-    _encoded_length,
-    _prepare_dispatch_prompt,
-)
-from bridge.queue import BridgeQueue
 
 
 def test_encoded_length_matches_encode_uri_component_semantics():
@@ -703,3 +706,156 @@ async def test_poll_activity_live_recent_dispatch():
     bridge = Bridge()
     activity = bridge._compute_activity(record, baseline_tool_uses=0)
     assert activity == "live"
+
+
+# Tests for ADR-0086: Brief-File Summary Prefix
+
+
+def test_validate_summary_none_unchanged():
+    """_validate_summary returns None unchanged."""
+    assert _validate_summary(None) is None
+
+
+def test_validate_summary_under_cap_unchanged():
+    """Summary under 600 encoded chars is returned unchanged."""
+    summary = "Short summary"
+    assert _validate_summary(summary) == summary
+
+
+def test_validate_summary_at_cap_unchanged():
+    """Summary at exactly 600 encoded chars is returned unchanged."""
+    # Create a summary that encodes to exactly 600 chars
+    # ASCII chars encode to 1 char each
+    summary = "x" * 600
+    result = _validate_summary(summary)
+    assert result == summary
+    assert _encoded_length(result) == 600
+
+
+def test_validate_summary_over_cap_truncated_with_ellipsis():
+    """Summary over 600 encoded chars is truncated with ' ...' appended."""
+    # 700 ASCII chars = 700 encoded chars
+    summary = "x" * 700
+    result = _validate_summary(summary)
+    
+    # Should end with " ..."
+    assert result.endswith(" ...")
+    # Encoded length should be <= 600
+    assert _encoded_length(result) <= 600
+
+
+def test_validate_summary_truncation_accounts_for_ellipsis():
+    """Truncation leaves room for the ' ...' ellipsis in encoded space."""
+    # Create a summary that's well over the limit
+    summary = "x" * 1000
+    result = _validate_summary(summary)
+    
+    # The result should be <= 600 encoded chars including the ellipsis
+    assert _encoded_length(result) <= 600
+    # The ellipsis should be present
+    assert result.endswith(" ...")
+
+
+def test_validate_summary_multibyte_truncation():
+    """Truncation works correctly with multibyte characters (CJK)."""
+    # CJK chars encode to 9 chars each (%XX%XX%XX for 3 bytes)
+    # 100 CJK chars = 900 encoded chars, over the limit
+    summary = "中" * 100
+    result = _validate_summary(summary)
+    
+    assert _encoded_length(result) <= 600
+    assert result.endswith(" ...")
+    assert len(result) < len(summary)
+
+
+def test_validate_summary_space_dense_truncation():
+    """Truncation works correctly with space-dense text (spaces encode to %20)."""
+    # Spaces encode to %20 (3 chars each)
+    # 300 spaces = 900 encoded chars
+    summary = "x " * 300  # 600 raw chars, but 900 encoded
+    result = _validate_summary(summary)
+    
+    assert _encoded_length(result) <= 600
+
+
+def test_prepare_dispatch_prompt_offload_with_summary(tmp_path, monkeypatch):
+    """Offload + summary present -> prompt starts with '<summary>. Your full task brief is at'."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    queue = BridgeQueue()
+    long_question = "x" * (ENCODED_BRIEF_THRESHOLD + 1)
+    record = queue.submit(long_question, "/tmp", summary="Task summary here")
+    
+    prompt = _prepare_dispatch_prompt(record)
+    
+    assert prompt.startswith("Task summary here. Your full task brief is at")
+    assert "read it first" in prompt
+
+
+def test_prepare_dispatch_prompt_offload_without_summary(tmp_path, monkeypatch):
+    """Offload + summary None -> today's unprefixed pointer (regression)."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    queue = BridgeQueue()
+    long_question = "x" * (ENCODED_BRIEF_THRESHOLD + 1)
+    record = queue.submit(long_question, "/tmp")  # No summary
+    
+    prompt = _prepare_dispatch_prompt(record)
+    
+    # Should be the original pointer format without prefix
+    assert prompt == f"Your full task brief is at `{tmp_path / '.vscode-agent-bridge' / 'briefs' / f'brief-{record.id}.md'}` — read it first, then proceed."
+
+
+def test_prepare_dispatch_prompt_inline_with_summary_discarded(tmp_path, monkeypatch):
+    """Inline dispatch (under threshold) + summary present -> returns question unchanged."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    queue = BridgeQueue()
+    short_question = "short question"
+    record = queue.submit(short_question, "/tmp", summary="Summary ignored for inline")
+    
+    prompt = _prepare_dispatch_prompt(record)
+    
+    # Summary is silently discarded for inline dispatch
+    assert prompt == short_question
+    assert "Summary ignored" not in prompt
+
+
+def test_prepare_dispatch_prompt_offload_empty_summary(tmp_path, monkeypatch):
+    """Offload + empty string summary -> treated as falsy, no prefix."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    queue = BridgeQueue()
+    long_question = "x" * (ENCODED_BRIEF_THRESHOLD + 1)
+    record = queue.submit(long_question, "/tmp", summary="")
+    
+    prompt = _prepare_dispatch_prompt(record)
+    
+    # Empty string is falsy, so no prefix
+    assert prompt.startswith("Your full task brief is at")
+    assert not prompt.startswith(". Your")  # No leading dot from empty summary
+
+
+def test_summary_headroom_arithmetic():
+    """ADR-0086 headroom math: baseline + separator + SUMMARY_ENCODED_CAP <= ENCODED_BRIEF_THRESHOLD.
+    
+    This makes the headroom arithmetic machine-checkable.
+    The "+2" in the original brief accounted for the ". " separator between summary and pointer.
+    """
+    # Compute the baseline encoded length of the pointer prompt template
+    # Using a realistic brief path under a mocked home dir
+    
+    # Simulate a typical brief path
+    with tempfile.TemporaryDirectory() as tmpdir:
+        briefs_dir = Path(tmpdir) / ".vscode-agent-bridge" / "briefs"
+        briefs_dir.mkdir(parents=True)
+        brief_path = briefs_dir / "brief-abc123.md"
+        
+        # The pointer template from _prepare_dispatch_prompt
+        pointer_template = f"Your full task brief is at `{brief_path}` — read it first, then proceed."
+        
+        baseline_encoded = _encoded_length(pointer_template)
+        
+        # Account for the ". " separator the merged prompt adds
+        separator_encoded = _encoded_length(". ")
+        
+        # The ADR claims ~1100 encoded baseline + 600 <= 1900
+        # This test makes that assertion machine-checkable
+        assert baseline_encoded + separator_encoded + SUMMARY_ENCODED_CAP <= ENCODED_BRIEF_THRESHOLD, \
+            f"Headroom violated: baseline ({baseline_encoded}) + separator ({separator_encoded}) + max_summary ({SUMMARY_ENCODED_CAP}) = {baseline_encoded + separator_encoded + SUMMARY_ENCODED_CAP} > threshold ({ENCODED_BRIEF_THRESHOLD})"

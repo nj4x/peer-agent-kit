@@ -148,3 +148,57 @@ async def test_poll_peer_agent_uses_bridge_poll_timeout_env_default(fresh_state,
 
     # Should return timed_out due to the 0.05s env timeout
     assert result["status"] == "timed_out"
+
+
+# Tests for ADR-0086: Brief-File Summary Prefix
+
+async def test_submit_to_peer_agent_with_summary(fresh_state, tmp_path, monkeypatch):
+    """submit_to_peer_agent accepts and propagates summary parameter."""
+    bridge, ws, tmp_path, ctx = fresh_state
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    
+    from bridge.bridge import ENCODED_BRIEF_THRESHOLD
+    
+    # Submit with a long question (triggers offload) and a summary
+    long_question = "x" * (ENCODED_BRIEF_THRESHOLD + 1)
+    result = await srv.submit_to_peer_agent(long_question, str(tmp_path), ctx, summary="Test summary")
+    
+    dispatched = await _drain_submit(ws)
+    
+    # The dispatched prompt should start with the summary prefix
+    assert dispatched["prompt"].startswith("Test summary. Your full task brief is at")
+    assert "read it first" in dispatched["prompt"]
+
+
+async def test_submit_to_peer_agent_without_summary(fresh_state, tmp_path, monkeypatch):
+    """submit_to_peer_agent without summary works as before (regression)."""
+    bridge, ws, tmp_path, ctx = fresh_state
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    
+    from bridge.bridge import ENCODED_BRIEF_THRESHOLD
+    
+    # Submit with a long question (triggers offload) but no summary
+    long_question = "x" * (ENCODED_BRIEF_THRESHOLD + 1)
+    await srv.submit_to_peer_agent(long_question, str(tmp_path), ctx)
+    
+    dispatched = await _drain_submit(ws)
+    
+    # The dispatched prompt should be the standard pointer without prefix
+    assert dispatched["prompt"].startswith("Your full task brief is at")
+    assert not dispatched["prompt"].startswith(". Your")
+
+
+async def test_submit_to_peer_agent_short_question_summary_ignored(fresh_state, tmp_path, monkeypatch):
+    """submit_to_peer_agent with short question ignores summary (inline dispatch)."""
+    bridge, ws, tmp_path, ctx = fresh_state
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    
+    # Submit with a short question (no offload) and a summary
+    short_question = "short task"
+    await srv.submit_to_peer_agent(short_question, str(tmp_path), ctx, summary="Ignored summary")
+    
+    dispatched = await _drain_submit(ws)
+    
+    # The dispatched prompt should be the original question, summary discarded
+    assert dispatched["prompt"] == short_question
+    assert "Ignored summary" not in dispatched["prompt"]
