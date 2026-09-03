@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
+from typing import Annotated
+
+from pydantic import Field
 
 from mcp.server.mcpserver.server import MCPServer
 from mcp.server.mcpserver.context import Context
@@ -47,7 +50,22 @@ def _bridge(ctx: Context) -> Bridge:
 
 
 @mcp.tool()
-async def submit_to_peer_agent(question: str, workspace: str, ctx: Context, summary: str | None = None) -> dict:
+async def submit_to_peer_agent(
+    question: str,
+    workspace: Annotated[
+        str,
+        Field(
+            description=(
+                "REQUIRED path to an existing directory — pass it as this argument, "
+                "never only inline in `question`. This is cline's live working tree: "
+                "its edits land here and show up in `git diff`. Never point it at a "
+                "workspace holding production credentials."
+            )
+        ),
+    ],
+    ctx: Context,
+    summary: str | None = None,
+) -> dict:
     """Ask cline-sr a question without waiting for the answer.
 
     Reaches a dedicated VS Code window running cline-sr. It works as a

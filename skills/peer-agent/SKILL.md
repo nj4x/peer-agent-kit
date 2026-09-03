@@ -38,7 +38,7 @@ Worked examples:
 
 These apply at every mode.
 
-1. Resolve the **workspace**: the directory the task is about, defaulting to the current working directory. It is cline's live working tree — edits land there and show up in `git diff`. Never delegate a workspace holding production credentials: the peer's reads inside it are unconstrained.
+1. Resolve the **workspace**: the directory the task is about, defaulting to the current working directory. Pass it as the `workspace` tool argument — never only inline in the `question` text. It is cline's live working tree — edits land there and show up in `git diff`. Never delegate a workspace holding production credentials: the peer's reads inside it are unconstrained.
 2. Brief the peer like a colleague with zero context: the goal, relevant file paths, constraints, and the report format you expect back.
 3. Use the blocking-poll idiom: call `submit_to_peer_agent`, then immediately collect with `poll_peer_agent(poll_timeout_seconds=180)` (or your chosen timeout). When the delegation needs multiple submit/poll cycles, spawn a general-purpose subagent to run the loop — it follows the same active mode's rules; there is no dedicated peer-agent agent type.
 4. Verify before reporting done: read the peer's answer and diff, then accept or redo. Acceptance stays local at every mode, including max.
