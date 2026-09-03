@@ -6,8 +6,8 @@ Code process — via a persistent companion window, replacing the bash-poll
 holds open; lifecycle events (start, tool use, completion, cancel) arrive
 over HTTP from cline-sr's native hook scripts instead of filesystem polling.
 
-Tools: `ask_peer_agent` (blocking), `submit_to_peer_agent` /
-`poll_peer_agent` (async pair). See `server.py` for the tool contract.
+Tools: `submit_to_peer_agent` / `poll_peer_agent` (blocking-poll idiom),
+`close_peer_agent`. See `server.py` for the tool contract.
 
 Companion VS Code extension: `vscode-agent-bridge/` at the repo root (not
 this directory).
@@ -91,7 +91,6 @@ Optional environment variables (set in the `env` block of the registration):
 
 | Variable | Default | Effect |
 |---|---|---|
-| `BRIDGE_ASK_TIMEOUT` | 180 | Blocking `ask_peer_agent` deadline (seconds) |
 | `BRIDGE_ASYNC_TIMEOUT` | 1800 | `submit_to_peer_agent` expiry (seconds) |
 
 ### 5. Verify the integration
@@ -103,12 +102,12 @@ claude mcp list                # server should be listed and connected
 tail -f ~/.vscode-agent-bridge/logs/vscode-agent-bridge.log
 ```
 
-From a Claude Code session: the tools `ask_peer_agent`,
-`submit_to_peer_agent`, `poll_peer_agent`, `close_peer_agent`, and
-`get_logs_for_session` should be available. Smoke test with a trivial
-delegation (via the `delegate-to-cline` skill or the `cline` agent type) —
-a dedicated VS Code window spawns at `~/.vscode-agent-bridge/data/` and the
-session log shows the task lifecycle.
+From a Claude Code session: the tools `submit_to_peer_agent`, `poll_peer_agent`,
+`close_peer_agent`, and `get_logs_for_session` should be available. Smoke test
+with a trivial delegation (via the `delegate-to-cline` skill or the `cline` agent
+type) — a dedicated VS Code window spawns at `~/.vscode-agent-bridge/data/` and
+the session log shows the task lifecycle. Use the blocking-poll idiom:
+`submit_to_peer_agent` followed immediately by `poll_peer_agent(poll_timeout_seconds=180)`.
 
 ### Troubleshooting
 
@@ -117,7 +116,7 @@ session log shows the task lifecycle.
 | Bridge window doesn't spawn | `code` CLI not in PATH (see step 1) |
 | Blocking error notification in bridge window | Hooks disabled in cline-sr — toggle Hooks ON in its settings webview |
 | Hook scripts missing | Extension not activated — reload a VS Code window after `npm run install-dev` |
-| `ask_peer_agent` times out at 180 s | Use the async pair (`submit_to_peer_agent` + `poll_peer_agent`) for long tasks |
+| Poll timeout expires | Increase `poll_timeout_seconds` or use `None` for indefinite wait |
 | Server crashes on startup | Dependencies missing — re-run `uv pip install -e ".[dev]"` |
 
 ## Dev

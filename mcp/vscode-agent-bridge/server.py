@@ -1,4 +1,4 @@
-"""vscode-agent-bridge MCP server — ask_peer_agent / submit_to_peer_agent / poll_peer_agent.
+"""vscode-agent-bridge MCP server — submit_to_peer_agent / poll_peer_agent / close_peer_agent.
 
 Delegates a task to cline-sr (a separate VS Code process) via a persistent
 dedicated window. Submission rides a WebSocket the companion extension
@@ -7,12 +7,13 @@ HTTP from cline-sr's hook scripts, which inherit BRIDGE_PORT from this
 server's own spawn of `code`.
 
 Environment variables:
-    BRIDGE_ASK_TIMEOUT: seconds `ask_peer_agent` blocks waiting for an answer (default: 180)
     BRIDGE_ASYNC_TIMEOUT: seconds before an unanswered submitted request expires (default: 1800)
+    BRIDGE_POLL_TIMEOUT: default timeout for `poll_peer_agent` long-poll (default: None = indefinite)
 """
 
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 
 from mcp.server.mcpserver.server import MCPServer
@@ -46,36 +47,19 @@ def _bridge(ctx: Context) -> Bridge:
 
 
 @mcp.tool()
-async def ask_peer_agent(question: str, workspace: str, ctx: Context) -> dict:
-    """Ask cline-sr, a separate VS Code agent, a question and wait for its answer.
-
-    Reaches a dedicated VS Code window running cline-sr. It works as a
-    delegate, not a sandbox: `workspace` (required, an existing directory) is
-    the live working tree it reads and edits — uncommitted work included —
-    so its edits land in your tree and show up in `git diff`. Never delegate
-    a workspace holding production credentials: reads inside it are
-    unconstrained.
-
-    Blocks for up to 180 seconds and costs a full turn on the far side.
-    Expensive: use it for a second opinion or a judgement only that agent can
-    give, never for trivia.
-
-    Returns {id, status, answer, command, reason}. `status` is "answered" or
-    "failed"; on failure `reason` is one of timeout, instance_down,
-    unknown_handle, internal_error.
-    """
-    return await _bridge(ctx).ask(question, workspace)
-
-
-@mcp.tool()
 async def submit_to_peer_agent(question: str, workspace: str, ctx: Context) -> dict:
     """Ask cline-sr a question without waiting for the answer.
 
-    Same peer agent and same trust boundary as `ask_peer_agent` — see its
-    docstring for what the far side can read and write. This variant returns
-    at once, so use it for work measured in minutes: collect the answer later
-    with `poll_peer_agent`. Submit several questions before polling any —
-    each waits its turn behind whatever is already in flight.
+    Reaches a dedicated VS Code window running cline-sr. It works as a
+    delegate, not a sandbox: `workspace` (required, an existing directory) is
+    the live working tree it reads and edits — uncommitted work included — so
+    its edits land in your tree and show up in `git diff`. Never delegate
+    a workspace holding production credentials: reads inside it are
+    unconstrained.
+
+    This variant returns at once, so use it for work measured in minutes: collect
+    the answer later with `poll_peer_agent`. Submit several questions before
+    polling any — each waits its turn behind whatever is already in flight.
 
     Returns {handle, status, reason}. `status` is always "submitted"; keep
     the `handle` to poll. A request nobody answers within 30 minutes expires,
@@ -84,21 +68,47 @@ async def submit_to_peer_agent(question: str, workspace: str, ctx: Context) -> d
     return await _bridge(ctx).submit(question, workspace)
 
 
+def _poll_timeout_default() -> float | None:
+    """Return the default poll timeout from BRIDGE_POLL_TIMEOUT env var, or None if not set."""
+    val = os.getenv("BRIDGE_POLL_TIMEOUT")
+    if val is not None:
+        try:
+            return float(val)
+        except ValueError:
+            raise ValueError(f"BRIDGE_POLL_TIMEOUT must be a number, got: {val}")
+    return None
+
+
 @mcp.tool()
-async def poll_peer_agent(handle: str, ctx: Context) -> dict:
-    """Check whether cline-sr has answered a submitted question. Never blocks.
+async def poll_peer_agent(handle: str, ctx: Context, poll_timeout_seconds: float | None = None) -> dict:
+    """Check whether cline-sr has answered a submitted question.
 
-    `handle` is what `submit_to_peer_agent` returned, or the `id` from an
-    `ask_peer_agent` call that timed out — recovering an answer that arrived
-    just too late.
+    This call blocks until the task reaches a terminal state or the timeout expires.
 
-    Returns {status, answer, command, reason, tool_uses, last_event_at}.
+    `handle` is what `submit_to_peer_agent` returned.
+
+    The `poll_timeout_seconds` parameter controls waiting behavior:
+        - 0: immediate snapshot, never blocks, returns "pending" if still in-flight
+        - positive: bounded wait, returns "timed_out" if the timeout expires
+        - None (default): indefinite wait until terminal state (bounded in practice by the
+          30-minute request expiry which returns failed/reason=timeout); default can be
+          overridden via BRIDGE_POLL_TIMEOUT environment variable
+
+    Returns {status, answer, command, reason, tool_uses, last_event_at, activity}.
     `status` is "pending" (still queued or being worked on — `tool_uses` and
     `last_event_at`, sourced from cline-sr's tool-use hooks, distinguish
-    actively working from hung), "answered", or "failed". On failure `reason`
-    is timeout, instance_down, cancelled, unknown_handle, or internal_error.
+    actively working from hung), "answered", "failed", or "timed_out".
+    On failure `reason` is timeout, instance_down, cancelled, unknown_handle,
+    or internal_error.
+    `activity` is "live" | "stalled" | null: "live" means the peer is actively
+    working (tool fired this poll or heartbeat within 30s), "stalled" means no
+    progress and heartbeat > 30s old (or dispatch > 30s with no events), null
+    means the task was never dispatched.
     """
-    return _bridge(ctx).poll(handle)
+    timeout = poll_timeout_seconds if poll_timeout_seconds is not None else _poll_timeout_default()
+    if timeout is not None and timeout < 0:
+        raise ValueError("poll_timeout_seconds must be non-negative")
+    return await _bridge(ctx).poll_async(handle, timeout)
 
 
 @mcp.tool()

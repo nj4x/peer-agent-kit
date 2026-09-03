@@ -7,6 +7,7 @@ one-task-at-a-time capacity (design/70).
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections import deque
@@ -37,6 +38,8 @@ class Record:
     last_event_at: float | None = None
     submitted_at: float = field(default_factory=time.monotonic)
     cline_task_id: str | None = None
+    signal_event: asyncio.Event = field(default_factory=asyncio.Event)
+    dispatch_at: float | None = None
 
 
 class BridgeQueue:
@@ -58,6 +61,7 @@ class BridgeQueue:
             return None
         record = self._pending.popleft()
         record.status = DISPATCHED
+        record.dispatch_at = time.monotonic()
         self._in_flight = record
         logger.info("task %s: queued -> dispatched", record.id)
         return record
@@ -123,6 +127,7 @@ class BridgeQueue:
         record.answer = answer
         record.command = command
         record.last_event_at = time.monotonic()
+        record.signal_event.set()
         self._in_flight = None
         logger.info("task %s: dispatched -> answered", record.id)
 
@@ -166,6 +171,7 @@ class BridgeQueue:
             return
         record.status = FAILED
         record.reason = reason
+        record.signal_event.set()
         self._in_flight = None
         logger.info("task %s: dispatched -> failed (reason=%s)", record.id, reason)
 
@@ -176,6 +182,7 @@ class BridgeQueue:
         prior = record.status
         record.status = FAILED
         record.reason = reason
+        record.signal_event.set()
         logger.info("task %s: %s -> failed (reason=%s)", record.id, prior, reason)
         if self._in_flight is record:
             self._in_flight = None

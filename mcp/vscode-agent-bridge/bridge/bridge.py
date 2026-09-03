@@ -9,18 +9,23 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import urllib.parse
 from pathlib import Path
+from typing import Literal
 
 from bridge.hookserver import HookServer
 from bridge.instance import InstanceManager
 from bridge.logsetup import get_logger, set_task_id
-from bridge.queue import BridgeQueue, Record
+from bridge.queue import ANSWERED, BridgeQueue, FAILED, QUEUED, Record
 
 logger = get_logger("bridge")
 
-POLL_INTERVAL = 0.25
 SWEEP_INTERVAL = 5.0
+# Stall predicate recency threshold, in seconds (ADR-0085 decision 3).
+ACTIVITY_STALE_THRESHOLD = 30.0
+
+Activity = Literal["live", "stalled"]
 
 # Conservative budget under the ~2000-char OS/VS Code URI lower bound, leaving
 # headroom for the URI scheme/path/param overhead (ADR-0077).
@@ -30,10 +35,6 @@ BRIEF_WARN_BYTES = 50 * 1024
 # encodeURIComponent()'s unescaped set beyond letters/digits/_.-~, which
 # urllib.parse.quote already leaves unescaped by default (ADR-0077 ID-011).
 _ENCODE_URI_COMPONENT_SAFE = "!'()*-._~"
-
-
-def _ask_timeout() -> float:
-    return float(os.getenv("BRIDGE_ASK_TIMEOUT", "180"))
 
 
 def _async_timeout() -> float:
@@ -210,31 +211,6 @@ class Bridge:
         set_task_id(None)
         await self._pump(async_timeout)
 
-    async def ask(self, question: str, workspace: str) -> dict:
-        """Submit a question and block until answered, failed, or ask-timeout."""
-        question = _validate(question, workspace)
-        record = self.queue.submit(question, workspace)
-        set_task_id(record.id)
-        try:
-            await self._pump(_async_timeout())
-
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + _ask_timeout()
-            while True:
-                current = self.queue.get(record.id)
-                logger.debug("ask poll heartbeat: status=%s", current.status)
-                if current.status == "answered":
-                    return {"id": record.id, "status": "answered", "answer": current.answer, "command": current.command, "reason": None}
-                if current.status == "failed":
-                    return {"id": record.id, "status": "failed", "answer": None, "command": None, "reason": current.reason}
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    self.queue.fail(record.id, "timeout")
-                    return {"id": record.id, "status": "failed", "answer": None, "command": None, "reason": "timeout"}
-                await asyncio.sleep(min(POLL_INTERVAL, remaining))
-        finally:
-            set_task_id(None)
-
     async def submit(self, question: str, workspace: str) -> dict:
         """Submit a question without waiting; returns a pollable handle."""
         question = _validate(question, workspace)
@@ -243,16 +219,93 @@ class Bridge:
         await self._pump(_async_timeout())
         return {"handle": record.id, "status": "submitted", "reason": None}
 
-    def poll(self, handle: str) -> dict:
-        """Report the current state of a submitted question. Never blocks."""
+    def _compute_activity(self, record: Record, baseline_tool_uses: int) -> Activity | None:
+        """Stall predicate for a dispatched task (ADR-0085 decision 3).
+
+        `baseline_tool_uses` is the `tool_uses` count snapshotted at poll
+        entry; a delta against it overrides recency. The reference instant
+        for recency is `last_event_at` if a hook has fired, else
+        `dispatch_at` — so a dispatched task with zero hook events is judged
+        by how long it has been dispatched, not by queue time.
+        """
+        if record.status == QUEUED:
+            return None
+        if record.status in (ANSWERED, FAILED):
+            return "live"
+
+        if record.tool_uses > baseline_tool_uses:
+            return "live"
+
+        reference_instant = record.last_event_at if record.last_event_at is not None else record.dispatch_at
+        if reference_instant is not None and time.monotonic() - reference_instant <= ACTIVITY_STALE_THRESHOLD:
+            return "live"
+        return "stalled"
+
+    def _poll_response(self, status: str, record: Record | None, *, reason: str | None = None, activity: Activity | None = None) -> dict:
+        return {
+            "status": status,
+            "answer": record.answer if record and status == "answered" else None,
+            "command": record.command if record and status == "answered" else None,
+            "reason": reason,
+            "tool_uses": record.tool_uses if record else None,
+            "last_event_at": record.last_event_at if record else None,
+            "activity": activity,
+        }
+
+    def poll(self, handle: str, baseline_tool_uses: int | None = None) -> dict:
+        """Report the current state of a submitted question. Never blocks.
+
+        `baseline_tool_uses` anchors the stall predicate for a dispatched
+        record; if omitted, the record's current `tool_uses` is used as its
+        own baseline (no delta possible — recency alone decides).
+        """
         record = self.queue.get(handle)
         if record is None:
-            return {"status": "failed", "answer": None, "command": None, "reason": "unknown_handle", "tool_uses": None, "last_event_at": None}
-        if record.status == "answered":
-            return {"status": "answered", "answer": record.answer, "command": record.command, "reason": None, "tool_uses": record.tool_uses, "last_event_at": record.last_event_at}
-        if record.status == "failed":
-            return {"status": "failed", "answer": None, "command": None, "reason": record.reason, "tool_uses": record.tool_uses, "last_event_at": record.last_event_at}
-        return {"status": "pending", "answer": None, "command": None, "reason": None, "tool_uses": record.tool_uses, "last_event_at": record.last_event_at}
+            return self._poll_response("failed", None, reason="unknown_handle")
+
+        baseline = baseline_tool_uses if baseline_tool_uses is not None else record.tool_uses
+        activity = self._compute_activity(record, baseline)
+
+        if record.status == ANSWERED:
+            return self._poll_response("answered", record, activity=activity)
+        if record.status == FAILED:
+            return self._poll_response("failed", record, reason=record.reason, activity=activity)
+        return self._poll_response("pending", record, activity=activity)
+
+    async def poll_async(self, handle: str, poll_timeout_seconds: float | None = None) -> dict:
+        """Poll with optional long-poll support.
+
+        Args:
+            handle: The record handle to poll.
+            poll_timeout_seconds: None (indefinite wait), 0 (immediate snapshot), or positive (bounded wait).
+
+        Returns:
+            Dict with status, answer, command, reason, tool_uses, last_event_at, activity.
+            On timeout, returns {"status": "timed_out", ...} with the task still pending.
+        """
+        record = self.queue.get(handle)
+        if record is None:
+            return self._poll_response("failed", None, reason="unknown_handle")
+
+        if record.status in (ANSWERED, FAILED):
+            return self.poll(handle)
+
+        # Snapshot tool_uses at poll entry — the stall predicate's baseline.
+        baseline_tool_uses = record.tool_uses
+
+        if poll_timeout_seconds == 0:
+            return self.poll(handle, baseline_tool_uses)
+
+        if poll_timeout_seconds is None:
+            await record.signal_event.wait()
+            return self.poll(handle, baseline_tool_uses)
+
+        try:
+            await asyncio.wait_for(record.signal_event.wait(), timeout=poll_timeout_seconds)
+            return self.poll(handle, baseline_tool_uses)
+        except asyncio.TimeoutError:
+            activity = self._compute_activity(record, baseline_tool_uses)
+            return self._poll_response("timed_out", record, activity=activity)
 
     def close(self) -> dict:
         """Close the dedicated window unless work is in flight or queued."""

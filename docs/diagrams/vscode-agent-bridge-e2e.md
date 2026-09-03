@@ -24,7 +24,7 @@ sequenceDiagram
         participant Bridge as Bridge (Orchestrator)
         participant HookServer as Hook Server (HTTP + WS)
     end
-    Note over MCP: MCP Tools:<br/>- ask_peer_agent<br/>- submit_to_peer_agent<br/>- poll_peer_agent<br/>- close_peer_agent<br/>- get_logs_for_session
+    Note over MCP: MCP Tools:<br/>- submit_to_peer_agent<br/>- poll_peer_agent<br/>- close_peer_agent<br/>- get_logs_for_session
     box LightYellow VS Code
         participant Extension as Extension
         participant Cline as cline-sr (Peer Agent)
@@ -46,84 +46,7 @@ sequenceDiagram
 
 ---
 
-### Diagram 2: Path A — ask_peer_agent (Blocking)
-
-Covers the blocking call path with 180s timeout. Includes dispatch logic and instance spawn/reuse decision.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    box LightBlue Claude Code
-        participant Client as MCP Client
-    end
-    box LightGreen MCP Server (Bridge)
-        participant MCP as MCP Tools
-        participant Bridge as Bridge (Orchestrator)
-        participant Queue as Queue (BridgeQueue)
-        participant HookServer as Hook Server (HTTP + WS)
-        participant Instance as Instance (VS Code Manager)
-    end
-    box LightYellow VS Code
-        participant Extension as Extension
-        participant Cline as cline-sr (Peer Agent)
-    end
-
-    rect rgb(235,245,255)
-    Note over Client,HookServer: PATH A - ask_peer_agent (blocking, 180s timeout)
-    Client->>MCP: ask_peer_agent(question, workspace)
-    activate MCP
-    MCP->>Queue: submit(question, workspace)
-    activate Queue
-    Queue-->>MCP: Record(id, status=queued)
-    deactivate Queue
-    MCP->>Bridge: _pump(async_timeout)
-    activate Bridge
-    Bridge->>Queue: next_dispatchable()
-    activate Queue
-    Queue-->>Bridge: Record (status=dispatched)
-    deactivate Queue
-    Bridge->>Instance: ensure_ready(workspace, port)
-    activate Instance
-    alt Instance not alive or different workspace
-        Instance->>Instance: _copy_template_profile() + _seed_settings() + _create_config_symlink()
-        Instance->>Instance: _seed_workspace_layout(folder) if unseen
-        Instance->>Instance: spawn code --user-data-dir workspace
-        Instance->>Extension: WebSocket connect /ws
-        activate Extension
-        Extension->>HookServer: WS open (liveness signal)
-        HookServer->>Instance: mark_connected()
-        Extension-->>Instance: connected
-        deactivate Extension
-    else Instance already ready
-        Instance-->>Bridge: ready (reuse)
-    end
-    Instance-->>Bridge: ready
-    deactivate Instance
-    Bridge->>Bridge: _prepare_dispatch_prompt(record)
-    alt encoded length <= threshold (inline dispatch)
-        Bridge-->>Bridge: return question inline
-    else encoded length > threshold (brief file offload)
-        Bridge->>Bridge: write brief to ~/.vscode-agent-bridge/briefs/brief-<id>.md
-        Bridge-->>Bridge: return pointer prompt
-    end
-    Bridge->>HookServer: dispatch(prompt)
-    HookServer->>Extension: WS send {type:submit, prompt}
-    Extension->>Extension: invoke URI handler
-    Extension->>Cline: vscode://cline-sr.cline-sr/task?prompt=...
-    activate Cline
-    Cline-->>Extension: task accepted
-    deactivate Cline
-    Bridge-->>MCP: dispatched
-    deactivate Bridge
-    deactivate MCP
-    end
-
-    Note over HookServer,Queue: All hook POSTs log with task_id= field (ADR-0069)
-```
-
----
-
-### Diagram 3: Task Execution + Hook Events Flow
+### Diagram 2: Task Execution + Hook Events Flow
 
 Covers the hook event flow from cline-sr back to the Bridge: TaskStart binding, tool-use loop (PreToolUse/PostToolUse), and TaskComplete with filter/recovery branches. Also includes the answer retrieval polling loop.
 
@@ -143,7 +66,7 @@ sequenceDiagram
         participant Hooks as Hook Scripts
     end
 
-    Note over Cline,Hooks: Task Execution & Hook Events Flow
+    Note over Cline,Hooks: Task Execution & Hook Events Flow (submit + blocking-poll idiom)
     Cline->>Cline: task starts
     Cline->>Hooks: TaskStart hook
     activate Hooks
@@ -197,35 +120,33 @@ sequenceDiagram
     HookServer-->>Hooks: {ok:true}
     deactivate Hooks
 
-    Note over MCP,Queue: Answer Retrieval (polling loop)
+    Note over MCP,Queue: Answer Retrieval (blocking-poll idiom)
     activate MCP
-    loop Poll until answered/failed/timeout
-        MCP->>Queue: get(record.id)
-        activate Queue
-        alt status == answered
-            Queue-->>MCP: Record(status=answered, answer, command)
-            MCP-->>Client: {id, status:answered, answer, command, reason:null}
-        else status == failed
-            Queue-->>MCP: Record(status=failed, reason)
-            MCP-->>Client: {id, status:failed, answer:null, reason}
-        else remaining > 0
-            Queue-->>MCP: Record(status=dispatched/pending)
-            MCP->>MCP: sleep(POLL_INTERVAL)
-        else timeout expired
-            MCP->>Queue: fail(record.id, "timeout")
-            Queue-->>MCP: status=failed
-            MCP-->>Client: {id, status:failed, reason:timeout}
-        end
-        deactivate Queue
+    Note over MCP,Queue: Client calls poll_peer_agent with poll_timeout_seconds for blocking wait
+    MCP->>Queue: get(record.id)
+    activate Queue
+    alt status == answered
+        Queue-->>MCP: Record(status=answered, answer, command)
+        MCP-->>Client: {status:answered, answer, command, reason:null, tool_uses, last_event_at, activity}
+    else status == failed
+        Queue-->>MCP: Record(status=failed, reason)
+        MCP-->>Client: {status:failed, answer:null, reason, tool_uses, last_event_at, activity}
+    else status == pending
+        Queue-->>MCP: Record(status=dispatched/pending)
+        MCP-->>Client: {status:pending, tool_uses, last_event_at, activity}
+    else status == timed_out
+        Queue-->>MCP: Record(status=dispatched/pending)
+        MCP-->>Client: {status:timed_out, tool_uses, last_event_at, activity}
     end
+    deactivate Queue
     deactivate MCP
 ```
 
 ---
 
-### Diagram 4: Path B — submit_to_peer_agent + poll_peer_agent (Async)
+### Diagram 3: Path — submit_to_peer_agent + poll_peer_agent (Blocking-Poll Idiom)
 
-Covers the async submission path (non-blocking) and later polling for the answer.
+Covers the blocking-poll idiom: submit without waiting, then poll with timeout.
 
 ```mermaid
 sequenceDiagram
@@ -246,7 +167,7 @@ sequenceDiagram
     end
 
     rect rgb(235,255,235)
-    Note over Client,Cline: PATH B - submit_to_peer_agent (async) + poll_peer_agent
+    Note over Client,Cline: submit_to_peer_agent + poll_peer_agent (blocking-poll idiom)
     Client->>MCP: submit_to_peer_agent(question, workspace)
     activate MCP
     MCP->>Queue: submit(question, workspace)
@@ -293,8 +214,8 @@ sequenceDiagram
     deactivate Bridge
     deactivate MCP
 
-    Note over Client,Queue: Later - Poll for Answer
-    Client->>MCP: poll_peer_agent(handle)
+    Note over Client,Queue: Immediately poll with blocking timeout
+    Client->>MCP: poll_peer_agent(handle, poll_timeout_seconds=180)
     activate MCP
     MCP->>Queue: get(handle)
     activate Queue
@@ -303,13 +224,16 @@ sequenceDiagram
         MCP-->>Client: {status:failed, reason:unknown_handle}
     else status == pending
         Queue-->>MCP: Record(status=dispatched, tool_uses, last_event_at)
-        MCP-->>Client: {status:pending, tool_uses, last_event_at}
+        MCP-->>Client: {status:pending, tool_uses, last_event_at, activity}
     else status == answered
         Queue-->>MCP: Record(status=answered, answer, command, tool_uses)
-        MCP-->>Client: {status:answered, answer, command, tool_uses, last_event_at}
+        MCP-->>Client: {status:answered, answer, command, tool_uses, last_event_at, activity}
     else status == failed
         Queue-->>MCP: Record(status=failed, reason, tool_uses)
-        MCP-->>Client: {status:failed, reason, tool_uses, last_event_at}
+        MCP-->>Client: {status:failed, reason, tool_uses, last_event_at, activity}
+    else status == timed_out
+        Queue-->>MCP: Record(status=dispatched, tool_uses, last_event_at)
+        MCP-->>Client: {status:timed_out, tool_uses, last_event_at, activity}
     end
     deactivate Queue
     deactivate MCP
@@ -318,7 +242,7 @@ sequenceDiagram
 
 ---
 
-### Diagram 5: Path C — close_peer_agent (Cleanup)
+### Diagram 4: Path — close_peer_agent (Cleanup)
 
 Covers graceful shutdown of the VS Code instance. Checks queue is empty before terminating.
 
@@ -361,7 +285,7 @@ sequenceDiagram
 
 ---
 
-### Diagram 6: Failure Paths
+### Diagram 5: Failure Paths
 
 Covers three failure scenarios: sweep timeout (async expiration), instance_down (WS disconnect), and TaskCancel with pre-bind/match/mismatch branches.
 
@@ -422,7 +346,7 @@ sequenceDiagram
     end
     end
 
-    Note right of Client: Claude Code MCP client.<br/>Uses ask_peer_agent (blocking),<br/>submit_to_peer_agent + poll_peer_agent (async),<br/>close_peer_agent (cleanup).
+    Note right of Client: Claude Code MCP client.<br/>Uses submit_to_peer_agent + poll_peer_agent (blocking-poll idiom),<br/>close_peer_agent (cleanup).
     Note right of HookServer: Two channels:<br/>HTTP POST /hook - lifecycle events<br/>WebSocket /ws - liveness + task submission
     Note right of Cline: Peer agent in separate VS Code window.<br/>Workspace is LIVE tree (edits show in git diff).<br/>Never delegate production credentials.
 ```
