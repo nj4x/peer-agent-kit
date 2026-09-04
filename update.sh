@@ -122,8 +122,8 @@ git -C "$KIT_DIR" pull origin "$REMOTE_HEAD" --ff-only || fail "git pull failed 
 
 echo "[peer-agent-kit] Rebuilding VS Code extension..."
 cd "$KIT_DIR/extension"
-npm ci 2>/dev/null || fail "extension npm ci failed"
-npm run install-dev 2>/dev/null || fail "extension install-dev failed"
+npm ci --no-fund --no-audit </dev/null 2>/dev/null || fail "extension npm ci failed"
+npm run install-dev </dev/null 2>/dev/null || fail "extension install-dev failed"
 cd "$KIT_DIR"
 
 # ===== Sync Python env =====
