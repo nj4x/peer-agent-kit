@@ -29,7 +29,11 @@ Activity = Literal["live", "stalled"]
 
 # Conservative budget under the ~2000-char OS/VS Code URI lower bound, leaving
 # headroom for the URI scheme/path/param overhead (ADR-0077).
-ENCODED_BRIEF_THRESHOLD = 1900
+# Lowered to 850 encoded chars (ADR-0087) to mitigate MCP client truncation risk:
+# observed MCP parameter truncation at ~1090 encoded chars; offloading to brief file
+# bypasses the MCP layer entirely. Value chosen to support ADR-0086 summary cap
+# (baseline pointer ~220 + separator ~4 + summary 600 = 824 ≤ 850, safety margin ~26).
+ENCODED_BRIEF_THRESHOLD = 850
 # Signal for oversized-brief investigation, not a hard cap (ADR-0077).
 BRIEF_WARN_BYTES = 50 * 1024
 # encodeURIComponent()'s unescaped set beyond letters/digits/_.-~, which

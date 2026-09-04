@@ -14,6 +14,7 @@ Environment variables:
 from __future__ import annotations
 
 import os
+import urllib.parse
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -27,6 +28,14 @@ from bridge.logsetup import get_logger, setup_logging
 
 setup_logging()
 logger = get_logger("server")
+
+# Question length below this (raw chars) flags a possible truncation warning (ADR-0087).
+SUSPICIOUSLY_SHORT_QUESTION_CHARS = 100
+
+
+def _encoded_length(text: str) -> int:
+    """Return the encoded byte-count of `text` under URL encoding (ADR-0077)."""
+    return len(urllib.parse.quote(text, safe="!'()*-._~").encode("utf-8"))
 
 
 @asynccontextmanager
@@ -92,6 +101,19 @@ async def submit_to_peer_agent(
     the `handle` to poll. A request nobody answers within 30 minutes expires,
     and polling it then reports failed with reason timeout.
     """
+    # Log question length for observability (ADR-0087).
+    raw_len = len(question)
+    encoded_len = _encoded_length(question)
+    logger.info("submit_to_peer_agent: question length raw=%d chars, encoded=%d bytes", raw_len, encoded_len)
+
+    # Warn if suspiciously short (possible truncation by MCP client, ADR-0087).
+    if raw_len < SUSPICIOUSLY_SHORT_QUESTION_CHARS:
+        logger.warning(
+            "question is suspiciously short (%d chars, < %d threshold) — "
+            "possible truncation by MCP client. Check the logs for the full prompt.",
+            raw_len, SUSPICIOUSLY_SHORT_QUESTION_CHARS
+        )
+
     return await _bridge(ctx).submit(question, workspace, summary)
 
 
