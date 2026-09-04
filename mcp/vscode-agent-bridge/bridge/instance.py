@@ -359,6 +359,167 @@ class InstanceManager:
         if merged != existing:
             settings_path.write_text(json.dumps(merged, indent=2) + "\n")
 
+    def _resolve_git_path(self, workspace: Path) -> Path | None:
+        """Resolve the .git path for a workspace, handling worktrees.
+        
+        Returns the Path to the .git directory (or file for worktrees), or None if not a git repo.
+        Same logic as _exclude_workspace_rag() in bridge.py.
+        """
+        git_path = workspace / ".git"
+        if not git_path.exists():
+            return None
+        
+        # Handle worktree case: .git is a file pointing elsewhere
+        if git_path.is_file():
+            try:
+                git_content = git_path.read_text().strip()
+                # Format: "gitdir: <path>"
+                if git_content.startswith("gitdir: "):
+                    return Path(git_content[8:].strip())
+                else:
+                    return Path(git_content)
+            except (OSError, IOError):
+                logger.warning("worktree .git file unreadable: %s", workspace)
+                return None
+        
+        return git_path
+
+    def _is_file_excluded(self, exclude_path: Path, filename: str) -> bool:
+        """Check if filename is listed as an exact line in .git/info/exclude.
+        
+        Uses exact stripped-line equality (not glob/substring matching).
+        Same logic as _exclude_workspace_rag() in bridge.py.
+        """
+        if not exclude_path.exists():
+            return False
+        try:
+            content = exclude_path.read_text()
+            for line in content.splitlines():
+                if line.strip() == filename:
+                    return True
+        except (OSError, IOError):
+            pass
+        return False
+
+    def _ensure_agents_md(self, workspace: Path) -> None:
+        """Convert CLAUDE.md/CLAUDE.local.md to AGENTS.md with compat symlink.
+        
+        This runs just before spawning/reloading a VS Code window (in ensure_ready),
+        targeting the new workspace root being opened (only on spawn or full reload,
+        NOT on sub-workspace/nested-path shortcut).
+        
+        Preconditions (ALL must hold, else skip silently):
+        1. Workspace is a git repo (.git present and resolvable)
+        2. AGENTS.md does NOT already exist at workspace root
+        3. Source file (CLAUDE.local.md or CLAUDE.md) exists AND is listed in .git/info/exclude
+        
+        Operations (in order):
+        1. Rename source file to AGENTS.md
+        2. Create relative symlink at original filename -> AGENTS.md
+        3. On symlink failure: rollback rename, log WARNING, continue
+        4. Add AGENTS.md to .git/info/exclude
+        5. Log DEBUG for each phase, INFO on success
+        
+        Opt-out: BRIDGE_AGENTS_MD_SYMLINK=0 disables feature entirely.
+        """
+        # Check env var opt-out
+        if os.getenv("BRIDGE_AGENTS_MD_SYMLINK", "1") == "0":
+            logger.debug("CLAUDE.md->AGENTS.md symlink feature disabled via BRIDGE_AGENTS_MD_SYMLINK=0")
+            return
+        
+        # 1. Check git repo
+        git_path = self._resolve_git_path(workspace)
+        if git_path is None:
+            logger.debug("ensure_agents_md: not a git repo, skipping: %s", workspace)
+            return
+        
+        # 2. Check AGENTS.md doesn't already exist
+        agents_md = workspace / "AGENTS.md"
+        if agents_md.exists():
+            logger.debug("ensure_agents_md: AGENTS.md already exists, skipping: %s", agents_md)
+            return
+        
+        # 3. Determine source file with precedence: CLAUDE.local.md > CLAUDE.md
+        exclude_path = git_path / "info" / "exclude"
+        source_file = None
+        
+        # Check CLAUDE.local.md first (higher precedence)
+        claude_local = workspace / "CLAUDE.local.md"
+        if claude_local.exists() and self._is_file_excluded(exclude_path, "CLAUDE.local.md"):
+            source_file = claude_local
+        else:
+            # Fall back to CLAUDE.md
+            claude_md = workspace / "CLAUDE.md"
+            if claude_md.exists() and self._is_file_excluded(exclude_path, "CLAUDE.md"):
+                source_file = claude_md
+        
+        if source_file is None:
+            logger.debug("ensure_agents_md: no excluded CLAUDE.md/CLAUDE.local.md found, skipping: %s", workspace)
+            return
+        
+        source_name = source_file.name
+        
+        # Operation 1: Rename source to AGENTS.md (atomic on same filesystem)
+        try:
+            os.rename(source_file, agents_md)
+            logger.debug("ensure_agents_md: renamed %s -> AGENTS.md", source_name)
+        except FileExistsError:
+            # Concurrent run already did the rename - idempotent, continue
+            logger.debug("ensure_agents_md: AGENTS.md already exists (concurrent run), continuing")
+            if not agents_md.exists():
+                # Race: existed check passed but now doesn't - re-check
+                return
+        except FileNotFoundError:
+            # Source disappeared between check and rename - skip
+            logger.debug("ensure_agents_md: source file disappeared: %s", source_file)
+            return
+        except OSError as exc:
+            logger.warning("ensure_agents_md: rename failed: %s -> AGENTS.md: %s", source_name, exc)
+            return
+        
+        # Operation 2: Create relative symlink at original filename -> AGENTS.md
+        symlink_path = workspace / source_name
+        try:
+            symlink_path.symlink_to("AGENTS.md")
+            logger.debug("ensure_agents_md: created symlink %s -> AGENTS.md", source_name)
+        except (OSError, FileExistsError) as exc:
+            # Symlink creation failed - rollback rename
+            logger.warning("ensure_agents_md: symlink creation failed: %s -> AGENTS.md: %s (rolling back)", source_name, exc)
+            try:
+                os.rename(agents_md, symlink_path)
+                logger.debug("ensure_agents_md: rolled back rename, restored %s", source_name)
+            except OSError as rollback_exc:
+                logger.warning("ensure_agents_md: rollback failed: %s", rollback_exc)
+            return
+        
+        # Operation 4: Add AGENTS.md to .git/info/exclude
+        try:
+            # Create info dir if needed
+            exclude_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Check for existing entry and append if missing
+            if exclude_path.exists():
+                content = exclude_path.read_text()
+                needs_append = True
+                for line in content.splitlines():
+                    if line.strip() == "AGENTS.md":
+                        needs_append = False
+                        break
+                if needs_append:
+                    if content and not content.endswith("\n"):
+                        content += "\n"
+                    content += "AGENTS.md\n"
+                    exclude_path.write_text(content)
+            else:
+                exclude_path.write_text("AGENTS.md\n")
+            logger.debug("ensure_agents_md: added AGENTS.md to exclude file")
+        except OSError as exc:
+            logger.warning("ensure_agents_md: failed to update exclude file: %s", exc)
+            # Non-fatal: continue
+        
+        # Operation 5: Log success
+        logger.info("agent instructions linked: %s -> AGENTS.md (compat symlink at %s)", source_name, source_name)
+
     # Required extensions for a bridge window, keyed by name + prefixes (publisher variants).
     # cline-sr's two prefixes are alternates (publisher naming varied across releases).
     _REQUIRED_EXTENSION_PREFIXES = {
@@ -427,6 +588,11 @@ class InstanceManager:
         # Different workspace: open in reused window (or spawn if not alive)
         # (Note: is_relative_to also returns True for exact equality, so no separate
         # exact-match guard is needed — the branch above already handles it.)
+        
+        # Convert CLAUDE.md/CLAUDE.local.md to AGENTS.md with compat symlink
+        # (only on spawn or full reload, NOT on sub-workspace shortcut - already returned above)
+        self._ensure_agents_md(workspace_resolved)
+        
         self._connected.clear()
         args = [self._code_bin, "--user-data-dir", str(self._data_dir), "--extensions-dir", str(self._data_dir / "extensions")]
         if self._alive:
