@@ -59,11 +59,11 @@ if [ "${1:-}" = "--vscode" ]; then
 
   echo "building VS Code extension..."
   cd "$EXTENSION_DIR"
-  if npm ci --prefer-offline 2>/dev/null; then
-    npm run compile 2>/dev/null || true
+  if npm ci --prefer-offline --no-fund --no-audit </dev/null 2>/dev/null; then
+    npm run compile </dev/null 2>/dev/null || true
     VSCODE_EXT_DIR="$HOME/.vscode/extensions"
     if [ -d "$VSCODE_EXT_DIR" ]; then
-      if npm run install-dev 2>/dev/null; then
+      if npm run install-dev </dev/null 2>/dev/null; then
         echo "extension installed: $VSCODE_EXT_DIR"
       else
         echo "warning: extension install-dev failed" >&2
@@ -213,11 +213,11 @@ PLUGIN_ROOT="$(cd -P "$(dirname "$SKILL_PATH")/../.." && pwd)"
 # Build and install extension (skip gracefully if ~/.vscode/extensions/ missing)
 echo "[peer-agent-kit] Building VS Code extension..."
 cd "$EXTENSION_DIR"
-if npm ci --prefer-offline 2>/dev/null; then
-  npm run compile 2>/dev/null || true
+if npm ci --prefer-offline --no-fund --no-audit </dev/null 2>/dev/null; then
+  npm run compile </dev/null 2>/dev/null || true
   VSCODE_EXT_DIR="$HOME/.vscode/extensions"
   if [ -d "$VSCODE_EXT_DIR" ]; then
-    if npm run install-dev 2>/dev/null; then
+    if npm run install-dev </dev/null 2>/dev/null; then
       echo "extension installed: $VSCODE_EXT_DIR"
     else
       echo "warning: extension install-dev failed" >&2
