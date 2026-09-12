@@ -25,6 +25,10 @@ SKILL_SOURCE="$KIT_DIR/skills/peer-agent"
 EXTENSION_DIR="$KIT_DIR/extension"
 INSTALL_DIR="${PEER_AGENT_KIT_INSTALL_DIR:-$HOME/.local/share/peer-agent-kit}"
 
+# shellcheck source=lib/code-bin.sh
+. "$KIT_DIR/lib/code-bin.sh"
+CODE_BIN="$(resolve_code_bin || true)"
+
 # Rollback handler — called on any error after manifest exists
 rollback_on_failure() {
   echo "[peer-agent-kit] Install failed — rolling back partial changes..." >&2
@@ -46,14 +50,8 @@ if [ "${1:-}" = "--vscode" ]; then
     fi
   fi
 
-  if ! command -v code >/dev/null 2>&1; then
-    VSCODE_APP_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin"
-    if [ -d "$VSCODE_APP_BIN" ]; then
-      echo "error: 'code' CLI not in PATH. Add it to your shell profile:" >&2
-      echo "  export PATH=\"$VSCODE_APP_BIN:\$PATH\"" >&2
-    else
-      echo "error: VS Code not found — install it first: https://code.visualstudio.com" >&2
-    fi
+  if [ -z "$CODE_BIN" ]; then
+    echo "error: VS Code not found — install it first: https://code.visualstudio.com" >&2
     exit 1
   fi
 
@@ -76,7 +74,7 @@ if [ "${1:-}" = "--vscode" ]; then
   fi
   cd "$KIT_DIR"
 
-  code --user-data-dir "$HOME/.vscode-agent-bridge/data" --disable-extension nj4x.vscode-agent-bridge >/dev/null 2>&1 &
+  "$CODE_BIN" --user-data-dir "$HOME/.vscode-agent-bridge/data" --disable-extension nj4x.vscode-agent-bridge >/dev/null 2>&1 &
   disown 2>/dev/null || true
   echo "opened VS Code for template profile setup — configure it, then close the window"
   exit 0
@@ -148,16 +146,11 @@ fi
 # first MCP launch isn't slow.
 uv python install >/dev/null 2>&1 || true
 
-# VS Code CLI — needed at runtime for the bridge to spawn its window.
-# Can't install the app; on macOS point at the bundled CLI if the app exists.
-if ! command -v code >/dev/null 2>&1; then
-  VSCODE_APP_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin"
-  if [ -d "$VSCODE_APP_BIN" ]; then
-    echo "warning: 'code' CLI not in PATH. Add it to your shell profile:" >&2
-    echo "  export PATH=\"$VSCODE_APP_BIN:\$PATH\"" >&2
-  else
-    echo "warning: VS Code not found — the bridge cannot spawn its window until VS Code + 'code' CLI are installed" >&2
-  fi
+# VS Code CLI — needed at runtime for the bridge to spawn its window. The
+# resolved path is handed to the MCP server via BRIDGE_CODE_BIN (mcp-patch.js)
+# because that process may not inherit shell-profile PATH additions.
+if [ -z "$CODE_BIN" ]; then
+  echo "warning: VS Code not found — the bridge cannot spawn its window until VS Code + 'code' CLI are installed" >&2
 fi
 
 # cline-sr — the peer agent itself; no public marketplace id, so check-only.
@@ -304,7 +297,7 @@ cat > "$KIT_HOME/manifest.json" <<JSON
 }
 JSON
 
-node "$KIT_DIR/lib/mcp-patch.js" "$MCP_CONFIG" "$KIT_DIR"
+node "$KIT_DIR/lib/mcp-patch.js" "$MCP_CONFIG" "$KIT_DIR" "$CODE_BIN"
 
 cp "$KIT_DIR"/hooks/*.js "$KIT_HOME/hooks/"
 
@@ -413,8 +406,8 @@ if [ ! -f "$TEMPLATE_USER_SETTINGS" ]; then
     if read -r answer; then
       case "$answer" in
         y|Y|yes|YES)
-          if command -v code >/dev/null 2>&1; then
-            code --user-data-dir "$HOME/.vscode-agent-bridge/data" --disable-extension nj4x.vscode-agent-bridge >/dev/null 2>&1 &
+          if [ -n "$CODE_BIN" ]; then
+            "$CODE_BIN" --user-data-dir "$HOME/.vscode-agent-bridge/data" --disable-extension nj4x.vscode-agent-bridge >/dev/null 2>&1 &
             disown 2>/dev/null || true
             echo "opened VS Code for one-time profile setup — configure it, then close the window"
           else

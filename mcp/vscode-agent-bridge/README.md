@@ -92,6 +92,7 @@ Optional environment variables (set in the `env` block of the registration):
 | Variable | Default | Effect |
 |---|---|---|
 | `BRIDGE_ASYNC_TIMEOUT` | 1800 | `submit_to_peer_agent` expiry (seconds) |
+| `BRIDGE_CODE_BIN` | `code` | Absolute path to the `code` CLI; install.sh/update.sh resolve and set this so the bridge can spawn VS Code even when this process lacks shell-profile PATH |
 
 ### 5. Verify the integration
 

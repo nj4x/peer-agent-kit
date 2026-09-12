@@ -1544,3 +1544,34 @@ def test_is_file_excluded_no_exclude_file(tmp_path):
     
     manager = InstanceManager()
     assert manager._is_file_excluded(exclude_file, "CLAUDE.md") is False
+
+
+def test_code_bin_defaults_to_bare_code(monkeypatch):
+    monkeypatch.delenv("BRIDGE_CODE_BIN", raising=False)
+    assert InstanceManager()._code_bin == "code"
+
+
+def test_code_bin_reads_bridge_code_bin_env(monkeypatch):
+    monkeypatch.setenv("BRIDGE_CODE_BIN", "/x/code")
+    assert InstanceManager()._code_bin == "/x/code"
+
+
+def test_code_bin_explicit_arg_wins_over_env(monkeypatch):
+    monkeypatch.setenv("BRIDGE_CODE_BIN", "/x/code")
+    assert InstanceManager(code_bin="code")._code_bin == "code"
+
+
+async def test_spawn_uses_env_resolved_code_bin(fake_spawn, monkeypatch):
+    monkeypatch.setenv("BRIDGE_CODE_BIN", "/x/code")
+    manager = InstanceManager()
+
+    async def connect_soon():
+        await asyncio.sleep(0)
+        manager.mark_connected()
+
+    task = asyncio.create_task(connect_soon())
+    await manager.ensure_ready("/tmp/repo", port=4321)
+    await task
+
+    args, _ = fake_spawn[0]
+    assert args[0] == "/x/code"

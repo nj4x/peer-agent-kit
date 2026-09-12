@@ -157,8 +157,13 @@ fi
 
 # ===== Repatch =====
 
+# Sourced after git pull so the freshly pulled helper is used.
+# shellcheck source=lib/code-bin.sh
+. "$KIT_DIR/lib/code-bin.sh" || fail "code-bin helper missing"
+CODE_BIN="$(resolve_code_bin || true)"
+
 echo "[peer-agent-kit] Repatching MCP config..."
-node "$KIT_DIR/lib/mcp-patch.js" "$MCP_CONFIG" "$KIT_DIR" || fail "MCP repatch failed"
+node "$KIT_DIR/lib/mcp-patch.js" "$MCP_CONFIG" "$KIT_DIR" "$CODE_BIN" || fail "MCP repatch failed"
 
 echo "[peer-agent-kit] Repatching settings.json..."
 node "$KIT_DIR/lib/settings-patch.js" "$SETTINGS" "$KIT_HOME/hooks" "$PLUGIN_ROOT" || fail "settings repatch failed"

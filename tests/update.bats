@@ -229,10 +229,13 @@ EOF
   run bash "$KIT_DIR/update.sh" 2>&1
   
   [ "$status" -eq 0 ]
-  
+
   # Manifest should be updated to the new fake SHA
   grep -q '"kitSha":' "$HOME/.peer-agent-kit/manifest.json"
   grep -q 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$HOME/.peer-agent-kit/manifest.json"
+
+  # MCP entry carries the resolved `code` path (the stub on PATH) for the runtime bridge
+  grep -q "\"BRIDGE_CODE_BIN\": \"$KIT_DIR/tests/stubs/code\"" "$HOME/.claude.json"
 }
 
 @test "git pull failure → nonzero exit, manifest kitSha unchanged" {

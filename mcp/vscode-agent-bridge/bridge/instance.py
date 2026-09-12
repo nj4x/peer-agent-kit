@@ -62,8 +62,9 @@ class InstanceUnreachable(RuntimeError):
 
 
 class InstanceManager:
-    def __init__(self, code_bin: str = "code") -> None:
-        self._code_bin = code_bin
+    def __init__(self, code_bin: str | None = None) -> None:
+        # install.sh resolves the absolute path; this process may lack shell PATH.
+        self._code_bin = code_bin or os.environ.get("BRIDGE_CODE_BIN") or "code"
         self.workspace: str | None = None
         self._open_root: Path | None = None  # Actual folder open in VS Code (ADR-0073)
         self._alive = False
