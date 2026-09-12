@@ -44,8 +44,8 @@ function resolveFlagPath(cwd) {
     try {
       // lstat, not stat: a symlinked .claude/ (e.g. committed by a hostile
       // repo — git only blocks the name .git, not .claude) must not be
-      // followed, or safeWriteFlag/clearFlag would write/delete through it
-      // into an attacker-chosen directory.
+      // followed, or safeWriteFlag would write through it into an
+      // attacker-chosen directory.
       if (fs.lstatSync(path.join(root, '.claude')).isDirectory()) {
         return { flagPath: path.join(root, '.claude', '.peer-agent-mode'), repoRoot: root, gitRoot: root, globalFlag };
       }
@@ -123,8 +123,4 @@ function readFlag(flagPath) {
   }
 }
 
-function clearFlag(flagPath) {
-  try { fs.unlinkSync(flagPath); } catch (e) { /* already gone */ }
-}
-
-module.exports = { VALID_MODES, getDefaultMode, safeWriteFlag, readFlag, clearFlag, resolveFlagPath, ensureGitExclude, createRepoClaudeDir };
+module.exports = { VALID_MODES, getDefaultMode, safeWriteFlag, readFlag, resolveFlagPath, ensureGitExclude, createRepoClaudeDir };

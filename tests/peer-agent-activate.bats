@@ -122,13 +122,14 @@ make_repo() {
   [[ "$output" != *"- max:"* ]]
 }
 
-@test "off mode emits nothing and clears the flag" {
+@test "off mode emits nothing and persists the flag (ADR 0004: off is absolute, not a delete)" {
   echo "off" > "$CLAUDE_CONFIG_DIR/.peer-agent-active"
 
   output="$(run_hook)"
 
   [ -z "$output" ]
-  [ ! -f "$CLAUDE_CONFIG_DIR/.peer-agent-active" ]
+  [ -f "$CLAUDE_CONFIG_DIR/.peer-agent-active" ]
+  [ "$(cat "$CLAUDE_CONFIG_DIR/.peer-agent-active")" = "off" ]
 }
 
 @test "every mode is resolvable from the global flag" {

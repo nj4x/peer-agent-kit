@@ -7,7 +7,7 @@
 // ruleset scrolls out of a long session's attention.
 'use strict';
 
-const { getDefaultMode, safeWriteFlag, readFlag, clearFlag, resolveFlagPath, ensureGitExclude, createRepoClaudeDir } = require('./peer-agent-config');
+const { getDefaultMode, safeWriteFlag, readFlag, resolveFlagPath, ensureGitExclude, createRepoClaudeDir } = require('./peer-agent-config');
 const { parseModeChange } = require('./peer-agent-parse');
 
 let input = '';
@@ -41,8 +41,10 @@ process.stdin.on('end', () => {
       }
     }
 
-    const change = skipParse ? null : parseModeChange(prompt);
-    if (change && change.action === 'set') {
+    // 'off' persists like any mode (ADR 0004) so a stale flag at another
+    // scope can't shadow it next turn.
+    const mode = skipParse ? null : parseModeChange(prompt);
+    if (mode) {
       // Explicit set in a repo without .claude/: create the dir so the mode
       // lands repo-scoped instead of clobbering the global flag (ADR 0004,
       // amended decision 2). Re-resolve so the lstat symlink check decides
@@ -51,22 +53,19 @@ process.stdin.on('end', () => {
         const re = resolveFlagPath(cwd);
         if (re.repoRoot) ({ flagPath, repoRoot } = re);
       }
-      safeWriteFlag(flagPath, change.mode);
+      safeWriteFlag(flagPath, mode);
       if (repoRoot) ensureGitExclude(repoRoot);
-    } else if (change && change.action === 'clear') {
-      clearFlag(flagPath);
     }
 
     // readFlag enforces symlink-safety + size cap + mode whitelist — if the
     // flag is missing, corrupted, or tampered with, this returns null and we
     // emit nothing rather than injecting untrusted bytes into model context.
-    // Repo flag absent falls back to the global flag (ADR 0004 decision 6) —
-    // except right after an explicit clear, which must silence the reminder.
+    // Repo flag absent falls back to the global flag (ADR 0004 decision 6).
     let activeMode = readFlag(flagPath);
-    if (activeMode === null && flagPath !== globalFlag && !(change && change.action === 'clear')) {
+    if (activeMode === null && flagPath !== globalFlag) {
       activeMode = readFlag(globalFlag);
     }
-    if (activeMode && getDefaultMode() !== 'off') {
+    if (activeMode && activeMode !== 'off' && getDefaultMode() !== 'off') {
       process.stdout.write(JSON.stringify({
         hookSpecificOutput: {
           hookEventName: 'UserPromptSubmit',

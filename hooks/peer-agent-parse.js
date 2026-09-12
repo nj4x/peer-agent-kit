@@ -4,7 +4,8 @@
 
 const { VALID_MODES, getDefaultMode } = require('./peer-agent-config');
 
-// Returns { action: 'set', mode } | { action: 'clear' } | null.
+// Returns the mode to set, or null for no match. 'off' is a real mode value
+// (ADR 0004): it is set the same way as lite/full/max, never a scope-revert.
 function parseModeChange(promptRaw) {
   const prompt = (promptRaw || '').trim().toLowerCase().replace(/\s+/g, ' ');
   if (!prompt) return null;
@@ -21,20 +22,20 @@ function parseModeChange(promptRaw) {
     (/\bstop\s+delegating\b/.test(prompt) && /\b(peer-agent|cline)\b/.test(prompt));
   // Note: "normal mode" is NOT an off-trigger here — it belongs to caveman-kit,
   // which may be installed alongside; reacting to it would couple the two kits.
-  if (wantsOff) return { action: 'clear' };
+  if (wantsOff) return 'off';
 
   // Questions about peer-agent are not activation commands.
   const isQuestion = /^(what|whats|what's|how|why|when|where|who|does|do|did|is|are|can|could|would|should|tell me|explain)\b/.test(prompt);
   if (!isQuestion) {
     // "delegate everything" is an explicit ask for the max policy, not the default.
     if (/\bdelegate\s+(everything|as much as (you can|possible))\b/.test(prompt)) {
-      return { action: 'set', mode: 'max' };
+      return 'max';
     }
     if (/\b(activate|enable|start|turn on|use|switch to|want|give me)\b[^.]{0,40}\bpeer-agent\b/.test(prompt) ||
         /\bpeer-agent\s+mode\s+(on|please|now)\b/.test(prompt) ||
         /^peer-agent(\s+mode)?\s*[.!]*$/.test(prompt)) {
       const mode = getDefaultMode();
-      return mode !== 'off' ? { action: 'set', mode } : null;
+      return mode !== 'off' ? mode : null;
     }
   }
 
@@ -42,12 +43,9 @@ function parseModeChange(promptRaw) {
     const parts = prompt.split(/\s+/);
     if (parts[0] !== '/peer-agent') return null; // e.g. /peer-agent-foo — not us
     const arg = parts[1] || '';
-    if (!arg) {
-      const mode = getDefaultMode();
-      return mode === 'off' ? { action: 'clear' } : { action: 'set', mode };
-    }
-    if (arg === 'off' || arg === 'stop' || arg === 'disable') return { action: 'clear' };
-    if (VALID_MODES.includes(arg)) return { action: 'set', mode: arg };
+    if (!arg) return getDefaultMode();
+    if (arg === 'off' || arg === 'stop' || arg === 'disable') return 'off';
+    if (VALID_MODES.includes(arg)) return arg;
     return null; // unknown level — leave flag untouched
   }
 

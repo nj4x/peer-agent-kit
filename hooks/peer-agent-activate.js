@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { VALID_MODES, getDefaultMode, safeWriteFlag, readFlag, clearFlag, resolveFlagPath, ensureGitExclude } = require('./peer-agent-config');
+const { VALID_MODES, getDefaultMode, safeWriteFlag, readFlag, resolveFlagPath, ensureGitExclude } = require('./peer-agent-config');
 
 let cwd = null;
 let hookEventName = 'SessionStart';
@@ -48,13 +48,14 @@ if (mode === null) {
   target = globalFlag;
 }
 
-if (mode === 'off') {
-  clearFlag(target);
-  process.exit(0);
-}
-
+// 'off' persists like any mode (ADR 0004), including on a passive session,
+// so it can't be erased here and resurface via the fallback chain.
 safeWriteFlag(target, mode);
 if (target === flagPath && repoRoot) ensureGitExclude(repoRoot);
+
+if (mode === 'off') {
+  process.exit(0);
+}
 
 if (!process.env.CLAUDE_PLUGIN_ROOT) {
   process.stderr.write('peer-agent-kit: CLAUDE_PLUGIN_ROOT not set, cannot locate the peer-agent skill\n');
