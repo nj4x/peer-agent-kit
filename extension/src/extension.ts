@@ -13,6 +13,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import WebSocket from "ws";
+import { buildTaskUriComponents } from "./taskUri";
 
 const HOOK_NAMES = [
   "TaskStart",
@@ -136,9 +137,7 @@ function connect(port: string): void {
 
 function submitToClineSr(prompt: string): void {
   log("INFO", `cline-sr task URI invoked (prompt length: ${prompt.length})`);
-  const uri = vscode.Uri.parse(
-    `${vscode.env.uriScheme}://cline-sr.cline-sr/task?prompt=${encodeURIComponent(prompt)}`
-  );
+  const uri = vscode.Uri.from(buildTaskUriComponents(vscode.env.uriScheme, prompt));
   vscode.env.openExternal(uri).then(undefined, (err: unknown) => {
     // Log the error's message only — never the uri/prompt content (ADR-0069).
     const detail = err instanceof Error ? err.message : String(err);

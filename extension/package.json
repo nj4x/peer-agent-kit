@@ -16,6 +16,7 @@
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -p . --watch",
+    "test": "tsc -p . && tsc $(find src -name '*.test.ts') --outDir out --module commonjs --target ES2022 --esModuleInterop --strict && node --test out --test-name-pattern='.*'",
     "install-dev": "bash scripts/install-dev.sh"
   },
   "dependencies": {
@@ -25,6 +26,7 @@
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.75.0",
     "@types/ws": "^8.5.10",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "vscode-uri": "^3.0.8"
   }
 }
