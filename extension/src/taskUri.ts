@@ -1,7 +1,10 @@
 // cline-sr decodeURIComponent()s the whole URI before URL-parsing it, so the
 // prompt must arrive double-encoded. Uri.from keeps this query verbatim and
 // Uri.toString() adds the second layer by encoding '%' as '%25'.
-export function buildTaskUriComponents(scheme: string, prompt: string) {
+export function buildTaskUriComponents(
+  scheme: string,
+  prompt: string
+): { scheme: string; authority: string; path: string; query: string } {
   return {
     scheme,
     authority: "cline-sr.cline-sr",
