@@ -8,9 +8,11 @@
 # exactly (byte-for-byte for settings/statusline, by removing for MCP/extension).
 #
 # The peer-agent skill ships with this kit (skills/peer-agent/); if not yet
-# present at $CLAUDE_CONFIG_DIR/skills/peer-agent, the installer copies it
-# in automatically. Pass --no-install-skill (or PEER_AGENT_KIT_INSTALL_SKILL=0)
-# to skip and manage it yourself.
+# present at $CLAUDE_CONFIG_DIR/skills/peer-agent, the installer symlinks it
+# in automatically. A pre-existing copy that differs from the kit's gets a
+# warning and an offer to replace it with the symlink (ADR 0088). Pass
+# --no-install-skill (or PEER_AGENT_KIT_INSTALL_SKILL=0) to skip and manage
+# it yourself.
 set -euo pipefail
 
 KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,12 +24,15 @@ STATUSLINE="$CLAUDE_DIR/statusline.sh"
 MCP_CONFIG="${HOME}/.claude.json"
 SKILL_PATH="$CLAUDE_DIR/skills/peer-agent/SKILL.md"
 SKILL_SOURCE="$KIT_DIR/skills/peer-agent"
+SKILL_DIR="$CLAUDE_DIR/skills/peer-agent"
 EXTENSION_DIR="$KIT_DIR/extension"
 INSTALL_DIR="${PEER_AGENT_KIT_INSTALL_DIR:-$HOME/.local/share/peer-agent-kit}"
 
 # shellcheck source=lib/code-bin.sh
 . "$KIT_DIR/lib/code-bin.sh"
 CODE_BIN="$(resolve_code_bin || true)"
+# shellcheck source=lib/skill-link.sh
+. "$KIT_DIR/lib/skill-link.sh"
 
 # Rollback handler — called on any error after manifest exists
 rollback_on_failure() {
@@ -97,7 +102,7 @@ skill_missing_abort() {
   echo "error: peer-agent skill not found at $SKILL_PATH" >&2
   echo "peer-agent-kit only wires up hooks for it — install the skill first:" >&2
   echo "  ln -s $SKILL_SOURCE $CLAUDE_DIR/skills/peer-agent" >&2
-  echo "or drop --no-install-skill to let this installer do it automatically." >&2
+  echo "or rerun without --no-install-skill / PEER_AGENT_KIT_INSTALL_SKILL=0 (accept the replace prompt, or set PEER_AGENT_KIT_REPLACE_SKILL=1) to let this installer do it." >&2
   exit 1
 }
 
@@ -111,6 +116,9 @@ if [ -d "$KIT_HOME" ]; then
     exit 1
   else
     echo "[peer-agent-kit] Found incomplete prior install at $KIT_HOME — cleaning up before retry..." >&2
+    # An interrupted install may have replaced a stale skill copy (ADR 0088);
+    # put it back first, so this run starts from the user's state.
+    skill_restore_backup "$SKILL_DIR" "$SKILL_SOURCE" "$(skill_backup_path)"
     rm -rf "$KIT_HOME"
   fi
 fi
@@ -170,9 +178,24 @@ if [ ! -f "$SETTINGS" ]; then
   exit 1
 fi
 
+# The kit links its skill in place (ADR 0088). A stale pre-existing copy is
+# only marked for replacement here; the replacement runs once the manifest
+# can record the backup, so a failed install restores the copy.
 SKILL_INSTALLED_BY_KIT=false
-SKILL_DIR="$CLAUDE_DIR/skills/peer-agent"
-if [ ! -f "$SKILL_PATH" ]; then
+SKILL_REPLACE=0
+SKILL_REPLACED_BACKUP="$(skill_backup_path)"
+SKILL_STATE="$(skill_state "$SKILL_DIR" "$SKILL_SOURCE")"
+if [ "$SKILL_STATE" = "differs" ]; then
+  skill_warn_stale "$SKILL_DIR" "$SKILL_SOURCE"
+  if [ "$INSTALL_SKILL" = "1" ] && ! skill_backup_taken \
+    && skill_confirm_replace "$SKILL_DIR" "$SKILL_SOURCE"; then
+    SKILL_REPLACE=1
+  else
+    skill_manual_fix_hint "$SKILL_DIR" "$SKILL_SOURCE"
+    [ -f "$SKILL_PATH" ] || skill_missing_abort
+  fi
+fi
+if [ "$SKILL_STATE" = "missing" ]; then
   if [ "$INSTALL_SKILL" != "1" ]; then
     if [ -t 0 ]; then
       printf 'peer-agent skill not found. Install %s now? (Y/n) ' "$SKILL_SOURCE"
@@ -186,9 +209,8 @@ if [ ! -f "$SKILL_PATH" ]; then
   fi
   [ "$INSTALL_SKILL" = "1" ] || skill_missing_abort
 
-  echo "installing peer-agent skill (copy from $SKILL_SOURCE)..."
-  mkdir -p "$CLAUDE_DIR/skills"
-  if ! cp -r "$SKILL_SOURCE" "$SKILL_DIR"; then
+  echo "installing peer-agent skill (symlink to $SKILL_SOURCE)..."
+  if ! skill_link "$SKILL_DIR" "$SKILL_SOURCE"; then
     echo "warning: automated skill install failed" >&2
     skill_missing_abort
   fi
@@ -201,7 +223,13 @@ fi
 
 # Resolve through the skill's symlink chain (if any) so the SessionStart hook
 # can find SKILL.md via CLAUDE_PLUGIN_ROOT regardless of how it's linked in.
-PLUGIN_ROOT="$(cd -P "$(dirname "$SKILL_PATH")/../.." && pwd)"
+# A copy marked for replacement is still in place here, and its chain may
+# lead elsewhere (or nowhere): the hook must read the kit copy instead.
+if [ "$SKILL_REPLACE" = "1" ]; then
+  PLUGIN_ROOT="$(cd -P "$KIT_DIR" && pwd)"
+else
+  PLUGIN_ROOT="$(cd -P "$(dirname "$SKILL_PATH")/../.." && pwd)"
+fi
 
 # Build and install extension (skip gracefully if ~/.vscode/extensions/ missing)
 echo "[peer-agent-kit] Building VS Code extension..."
@@ -353,10 +381,19 @@ JSON
 # Backup first; manifest is written with the skill fields BEFORE the patch
 # attempt (decision 6) so uninstall.sh can always clean up correctly even if
 # the patch fails. Patch failure is non-fatal by design.
+# The kit's own SKILL.md already carries the key; a skill that resolves into
+# the kit (or is about to) is never patched, since that would write into the
+# kit's git tree.
 SKILL_BACKUP_JSON="null"
 SKILL_NEEDS_PATCH=1
-if grep -q '^disable-model-invocation:' "$SKILL_PATH" 2>/dev/null; then
+if grep -q '^disable-model-invocation:' "$SKILL_PATH" 2>/dev/null \
+  || [ "$SKILL_REPLACE" = "1" ] \
+  || [ "$SKILL_STATE" = "missing" ] || [ "$SKILL_STATE" = "linked" ]; then
   SKILL_NEEDS_PATCH=0
+fi
+SKILL_REPLACED_BACKUP_JSON="null"
+if [ "$SKILL_REPLACE" = "1" ]; then
+  SKILL_REPLACED_BACKUP_JSON="\"$SKILL_REPLACED_BACKUP\""
 fi
 if [ "$SKILL_NEEDS_PATCH" = "1" ]; then
   if cp "$SKILL_PATH" "$BACKUP_DIR/SKILL.md.bak"; then
@@ -379,9 +416,16 @@ cat > "$KIT_HOME/manifest.json" <<JSON
   "pluginRoot": "$PLUGIN_ROOT",
   "skillInstalledByKit": $SKILL_INSTALLED_BY_KIT,
   "skillBackup": $SKILL_BACKUP_JSON,
+  "skillReplacedBackup": $SKILL_REPLACED_BACKUP_JSON,
   "completed": false
 }
 JSON
+
+# Manifest now records the backup path; replace the stale copy (ADR 0088).
+if [ "$SKILL_REPLACE" = "1" ]; then
+  echo "replacing $SKILL_DIR with a symlink to $SKILL_SOURCE (backup: $SKILL_REPLACED_BACKUP)..."
+  skill_replace "$SKILL_DIR" "$SKILL_SOURCE" "$SKILL_REPLACED_BACKUP"
+fi
 
 if [ "$SKILL_NEEDS_PATCH" = "1" ]; then
   if ! node "$KIT_DIR/lib/skill-patch.js" "$SKILL_PATH"; then
@@ -444,6 +488,7 @@ cat > "$KIT_HOME/manifest.json" <<JSON
   "pluginRoot": "$PLUGIN_ROOT",
   "skillInstalledByKit": $SKILL_INSTALLED_BY_KIT,
   "skillBackup": $SKILL_BACKUP_JSON,
+  "skillReplacedBackup": $SKILL_REPLACED_BACKUP_JSON,
   "kitSha": $KIT_SHA_JSON,
   "completed": true
 }

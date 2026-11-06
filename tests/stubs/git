@@ -23,6 +23,14 @@ case "$cmd" in
     fi
     exit 1
     ;;
+  show)
+    # git show <sha>:skills/peer-agent/SKILL.md - old kit version, if the test sets one
+    if [[ -n "${FAKE_OLD_SKILL:-}" && -f "$FAKE_OLD_SKILL" ]]; then
+      cat "$FAKE_OLD_SKILL"
+      exit 0
+    fi
+    exit 1
+    ;;
   rev-parse)
     # git rev-parse origin/main or git rev-parse HEAD
     if [[ "$*" == *"origin/main"* ]]; then

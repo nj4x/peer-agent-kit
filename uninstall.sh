@@ -17,6 +17,8 @@ KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIT_HOME="$HOME/.peer-agent-kit"
 MANIFEST="$KIT_HOME/manifest.json"
 INSTALL_DIR="${PEER_AGENT_KIT_INSTALL_DIR:-$HOME/.local/share/peer-agent-kit}"
+# shellcheck source=lib/skill-link.sh
+. "$KIT_DIR/lib/skill-link.sh"
 
 if [ ! -d "$KIT_HOME" ]; then
   echo "error: peer-agent-kit is not installed ($KIT_HOME not found)" >&2
@@ -39,6 +41,9 @@ if [ ! -f "$MANIFEST" ]; then
   SETTINGS="$CLAUDE_DIR/settings.json"
   STATUSLINE="$CLAUDE_DIR/statusline.sh"
   MCP_CONFIG="${HOME}/.claude.json"
+
+  # A skill copy the kit replaced lives outside $KIT_HOME (ADR 0088).
+  skill_restore_backup "$CLAUDE_DIR/skills/peer-agent" "$KIT_DIR/skills/peer-agent" "$(skill_backup_path)"
   
   if [ -f "$SETTINGS" ]; then
     node "$KIT_DIR/lib/settings-unpatch.js" "$SETTINGS" || true
@@ -73,10 +78,28 @@ fi
 
 CLAUDE_DIR="$(node -e "console.log(JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')).claudeDir)")"
 SKILL_INSTALLED_BY_KIT="$(node -e "const m=JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')); console.log(m.skillInstalledByKit === true ? 'true' : 'false')")"
+SKILL_REPLACED_BACKUP="$(node -e "const m=JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')); console.log(m.skillReplacedBackup || '')")"
 
 SETTINGS="$CLAUDE_DIR/settings.json"
 STATUSLINE="$CLAUDE_DIR/statusline.sh"
 MCP_CONFIG="${HOME}/.claude.json"
+
+# Skill cleanup (ADR 0088). Runs right after the manifest reads,
+# before the unpatch steps: one of those failing under set -e must not strand
+# a replaced skill copy. (If the manifest itself cannot be read, the script
+# stops above; the copy then stays at the backup path, not lost.)
+# - The kit replaced a stale pre-existing copy with its symlink: put that
+#   copy back, but only over the kit symlink (skill_restore_backup).
+# - The kit installed the skill itself: remove it (a symlink since ADR 0088,
+#   a copy on older installs).
+# - Otherwise the skill is the user's: leave it.
+SKILL_DIR="$CLAUDE_DIR/skills/peer-agent"
+if [ -n "$SKILL_REPLACED_BACKUP" ]; then
+  skill_restore_backup "$SKILL_DIR" "$KIT_DIR/skills/peer-agent" "$SKILL_REPLACED_BACKUP"
+elif [ "$SKILL_INSTALLED_BY_KIT" = "true" ]; then
+  rm -rf "$SKILL_DIR"
+  echo "removed: $SKILL_DIR (installed by peer-agent-kit)"
+fi
 
 # Surgically remove peer-agent hooks from settings.json using marker-based detection
 if [ -f "$SETTINGS" ]; then
@@ -107,14 +130,6 @@ if [ -d "$VSCODE_EXT_DIR" ]; then
     rm "$LINK"
     echo "removed: $LINK (extension symlink)"
   fi
-fi
-
-# Skill cleanup (ADR 0002/0003): remove entirely if the kit installed it;
-# otherwise leave it (copied installation is permanent).
-SKILL_DIR="$CLAUDE_DIR/skills/peer-agent"
-if [ "$SKILL_INSTALLED_BY_KIT" = "true" ]; then
-  rm -rf "$SKILL_DIR"
-  echo "removed: $SKILL_DIR (installed by peer-agent-kit)"
 fi
 
 # Remove Cline hooks installed by the bridge (marker-based cleanup)

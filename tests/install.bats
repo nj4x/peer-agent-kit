@@ -40,12 +40,20 @@ setup() {
   # Stub node to avoid real npm/uv operations in tests
   # We only test file layout, not dependency installation
   # Fix #2: Use per-test isolated stub directory instead of tracked location
+  # skill-patch.js runs on the real node so the frontmatter-patch guards are
+  # exercised; resolve it before the stub shadows it.
+  export REAL_NODE="$(command -v node)"
   export PATH="$TEST_STUBS_DIR:$PATH"
   
   # Create stub scripts that simulate successful operations without side effects
   cat > "$TEST_STUBS_DIR/node" <<'STUB'
 #!/usr/bin/env bash
 # Stub node that handles the specific invocations from install.sh and uninstall.sh
+
+# Run the frontmatter patcher for real (ADR 0088 no-patch guards)
+if [[ "${1:-}" == *skill-patch.js ]]; then
+  exec "$REAL_NODE" "$@"
+fi
 
 # Check for various invocation patterns
 if [[ "$*" == *"mcpServers"* ]] || [[ "$*" == *"config.mcpServers"* ]]; then
@@ -258,4 +266,196 @@ echo "test hook"' > "$HOME/Documents/Cline/Hooks/PreToolUse"
   
   # Bridge hook should be removed
   [ ! -f "$HOME/Documents/Cline/Hooks/PreToolUse" ]
+}
+
+# --- Skill symlink (ADR 0088, issue #33) -------------------------------------
+
+# No disable-model-invocation key, so install.sh patches a kept copy (asserted
+# below). The kit SKILL.md already has the key, so the kit checksum checks
+# are a guard against other writes through the symlink, not against the patch.
+STALE_SKILL='---
+name: peer-agent
+---
+Quick question or small task: `ask_peer_agent` — blocks up to 180 seconds.'
+
+seed_stale_skill() {
+  mkdir -p "$CLAUDE_CONFIG_DIR/skills/peer-agent"
+  printf '%s\n' "$STALE_SKILL" > "$CLAUDE_CONFIG_DIR/skills/peer-agent/SKILL.md"
+}
+
+SKILL_BACKUP() { echo "$HOME/.peer-agent-kit-skill-backup"; }
+kit_skill_sum() { shasum "$KIT_DIR/skills/peer-agent/SKILL.md" | cut -d' ' -f1; }
+
+@test "install with no skill links the kit skill directory and records skillInstalledByKit" {
+  cd "$KIT_DIR"
+  run bash "$KIT_DIR/install.sh" 2>&1
+
+  [ "$status" -eq 0 ]
+  [ -L "$CLAUDE_CONFIG_DIR/skills/peer-agent" ]
+  [ "$(cd -P "$CLAUDE_CONFIG_DIR/skills/peer-agent" && pwd)" = "$KIT_DIR/skills/peer-agent" ]
+  grep -q '"skillInstalledByKit": true' "$HOME/.peer-agent-kit/manifest.json"
+  grep -q '"skillReplacedBackup": null' "$HOME/.peer-agent-kit/manifest.json"
+  # SessionStart reads $pluginRoot/skills/peer-agent/SKILL.md: must be the kit copy.
+  grep -q "\"pluginRoot\": \"$KIT_DIR\"" "$HOME/.peer-agent-kit/manifest.json"
+}
+
+@test "install with a stale skill copy and no terminal warns and keeps the copy" {
+  seed_stale_skill
+  cd "$KIT_DIR"
+  run bash "$KIT_DIR/install.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"differs from the kit copy"* ]]
+  [[ "$output" == *"ln -s $KIT_DIR/skills/peer-agent"* ]]
+  [ ! -L "$CLAUDE_CONFIG_DIR/skills/peer-agent" ]
+  grep -q 'ask_peer_agent' "$CLAUDE_CONFIG_DIR/skills/peer-agent/SKILL.md"
+  grep -q '"skillReplacedBackup": null' "$HOME/.peer-agent-kit/manifest.json"
+  # The kept copy is the user's: install.sh still patches its frontmatter.
+  grep -q '^disable-model-invocation: true' "$CLAUDE_CONFIG_DIR/skills/peer-agent/SKILL.md"
+}
+
+@test "install with a stale skill copy and PEER_AGENT_KIT_REPLACE_SKILL=1 backs it up and links the kit copy" {
+  seed_stale_skill
+  before="$(kit_skill_sum)"
+  cd "$KIT_DIR"
+  PEER_AGENT_KIT_REPLACE_SKILL=1 run bash "$KIT_DIR/install.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  [ -L "$CLAUDE_CONFIG_DIR/skills/peer-agent" ]
+  [ "$(cd -P "$CLAUDE_CONFIG_DIR/skills/peer-agent" && pwd)" = "$KIT_DIR/skills/peer-agent" ]
+  grep -q 'ask_peer_agent' "$(SKILL_BACKUP)/SKILL.md"
+  grep -q "\"skillReplacedBackup\": \"$(SKILL_BACKUP)\"" "$HOME/.peer-agent-kit/manifest.json"
+  grep -q "\"pluginRoot\": \"$KIT_DIR\"" "$HOME/.peer-agent-kit/manifest.json"
+  # The kit copy is never patched in place.
+  [ "$(kit_skill_sum)" = "$before" ]
+}
+
+@test "install replacing a stale skill symlinked from another tree points pluginRoot at the kit" {
+  mkdir -p "$HOME/dotfiles/skills/peer-agent" "$CLAUDE_CONFIG_DIR/skills"
+  printf '%s\n' "$STALE_SKILL" > "$HOME/dotfiles/skills/peer-agent/SKILL.md"
+  ln -s "$HOME/dotfiles/skills/peer-agent" "$CLAUDE_CONFIG_DIR/skills/peer-agent"
+  cd "$KIT_DIR"
+  PEER_AGENT_KIT_REPLACE_SKILL=1 run bash "$KIT_DIR/install.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  [ "$(cd -P "$CLAUDE_CONFIG_DIR/skills/peer-agent" && pwd)" = "$KIT_DIR/skills/peer-agent" ]
+  # SessionStart reads $pluginRoot/skills/peer-agent/SKILL.md: not the dotfiles copy.
+  grep -q "\"pluginRoot\": \"$KIT_DIR\"" "$HOME/.peer-agent-kit/manifest.json"
+  grep -q 'ask_peer_agent' "$HOME/dotfiles/skills/peer-agent/SKILL.md"
+}
+
+@test "install with a stale copy and a taken backup slot keeps the copy" {
+  seed_stale_skill
+  mkdir -p "$(SKILL_BACKUP)"
+  echo first > "$(SKILL_BACKUP)/SKILL.md"
+  cd "$KIT_DIR"
+  PEER_AGENT_KIT_REPLACE_SKILL=1 run bash "$KIT_DIR/install.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  [ ! -L "$CLAUDE_CONFIG_DIR/skills/peer-agent" ]
+  [ "$(cat "$(SKILL_BACKUP)/SKILL.md")" = "first" ]
+}
+
+@test "re-running install after an interrupted replace restores the copy before cleanup" {
+  # State an install leaves when interrupted (Ctrl-C) after the replace.
+  mkdir -p "$HOME/.peer-agent-kit/backup" "$CLAUDE_CONFIG_DIR/skills" "$(SKILL_BACKUP)"
+  echo '{"completed": false}' > "$HOME/.peer-agent-kit/manifest.json"
+  printf '%s\n' "$STALE_SKILL" > "$(SKILL_BACKUP)/SKILL.md"
+  ln -s "$KIT_DIR/skills/peer-agent" "$CLAUDE_CONFIG_DIR/skills/peer-agent"
+  cd "$KIT_DIR"
+  run bash "$KIT_DIR/install.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"restored: $CLAUDE_CONFIG_DIR/skills/peer-agent"* ]]
+  [ ! -L "$CLAUDE_CONFIG_DIR/skills/peer-agent" ]
+  grep -q 'ask_peer_agent' "$CLAUDE_CONFIG_DIR/skills/peer-agent/SKILL.md"
+}
+
+@test "install with --no-install-skill and a stale copy warns and never replaces it" {
+  seed_stale_skill
+  cd "$KIT_DIR"
+  PEER_AGENT_KIT_REPLACE_SKILL=1 run bash "$KIT_DIR/install.sh" --no-install-skill </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"differs from the kit copy"* ]]
+  [ ! -L "$CLAUDE_CONFIG_DIR/skills/peer-agent" ]
+}
+
+# Uninstall reads skillReplacedBackup with node; the stubbed node answers
+# nothing for it, so these tests run uninstall.sh against the real node.
+run_uninstall_real_node() {
+  rm -f "$TEST_STUBS_DIR/node"
+  cd "$KIT_DIR"
+  run bash "$KIT_DIR/uninstall.sh" 2>&1
+}
+
+write_manifest() {
+  mkdir -p "$HOME/.peer-agent-kit/backup"
+  printf '{\n  "claudeDir": "%s",\n  "mcpPriorEntry": null,\n  "pluginRoot": "%s",\n  "skillInstalledByKit": %s,\n  "skillBackup": null,\n  "skillReplacedBackup": %s,\n  "completed": true\n}\n' \
+    "$CLAUDE_CONFIG_DIR" "$CLAUDE_CONFIG_DIR" "$1" "$2" > "$HOME/.peer-agent-kit/manifest.json"
+}
+
+@test "uninstall restores the pre-install skill copy the kit replaced" {
+  write_manifest false "\"$(SKILL_BACKUP)\""
+  mkdir -p "$(SKILL_BACKUP)"
+  printf '%s\n' "$STALE_SKILL" > "$(SKILL_BACKUP)/SKILL.md"
+  mkdir -p "$CLAUDE_CONFIG_DIR/skills"
+  ln -s "$KIT_DIR/skills/peer-agent" "$CLAUDE_CONFIG_DIR/skills/peer-agent"
+
+  run_uninstall_real_node
+
+  [ "$status" -eq 0 ]
+  [ ! -L "$CLAUDE_CONFIG_DIR/skills/peer-agent" ]
+  grep -q 'ask_peer_agent' "$CLAUDE_CONFIG_DIR/skills/peer-agent/SKILL.md"
+  [ -f "$KIT_DIR/skills/peer-agent/SKILL.md" ]
+}
+
+@test "uninstall keeps a skill copy the user put in place after the replace" {
+  write_manifest false "\"$(SKILL_BACKUP)\""
+  mkdir -p "$(SKILL_BACKUP)"
+  echo older > "$(SKILL_BACKUP)/SKILL.md"
+  seed_stale_skill
+
+  run_uninstall_real_node
+
+  [ "$status" -eq 0 ]
+  grep -q 'ask_peer_agent' "$CLAUDE_CONFIG_DIR/skills/peer-agent/SKILL.md"
+  [ "$(cat "$(SKILL_BACKUP)/SKILL.md")" = "older" ]
+}
+
+@test "uninstall leaves the skill copy alone when the recorded backup was never made" {
+  # skillInstalledByKit true: without the recorded-backup branch, uninstall
+  # would take the rm -rf branch and delete the copy.
+  write_manifest true "\"$(SKILL_BACKUP)\""
+  seed_stale_skill
+
+  run_uninstall_real_node
+
+  [ "$status" -eq 0 ]
+  grep -q 'ask_peer_agent' "$CLAUDE_CONFIG_DIR/skills/peer-agent/SKILL.md"
+}
+
+@test "uninstall without a manifest restores a replaced skill copy from the fixed backup path" {
+  mkdir -p "$HOME/.peer-agent-kit" "$(SKILL_BACKUP)" "$CLAUDE_CONFIG_DIR/skills"
+  printf '%s\n' "$STALE_SKILL" > "$(SKILL_BACKUP)/SKILL.md"
+  ln -s "$KIT_DIR/skills/peer-agent" "$CLAUDE_CONFIG_DIR/skills/peer-agent"
+
+  run_uninstall_real_node
+
+  [ "$status" -eq 0 ]
+  [ ! -L "$CLAUDE_CONFIG_DIR/skills/peer-agent" ]
+  grep -q 'ask_peer_agent' "$CLAUDE_CONFIG_DIR/skills/peer-agent/SKILL.md"
+}
+
+@test "uninstall removes the kit skill symlink but not the kit copy" {
+  write_manifest true null
+  mkdir -p "$CLAUDE_CONFIG_DIR/skills"
+  ln -s "$KIT_DIR/skills/peer-agent" "$CLAUDE_CONFIG_DIR/skills/peer-agent"
+
+  run_uninstall_real_node
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$CLAUDE_CONFIG_DIR/skills/peer-agent" ]
+  [ ! -L "$CLAUDE_CONFIG_DIR/skills/peer-agent" ]
+  [ -f "$KIT_DIR/skills/peer-agent/SKILL.md" ]
 }
