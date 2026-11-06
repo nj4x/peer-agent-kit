@@ -21,6 +21,8 @@ curl -fsSL https://raw.githubusercontent.com/nj4x/peer-agent-kit/main/bootstrap.
 Environment overrides:
 - `PEER_AGENT_KIT_GIT_REPO` — Git repo URL (default: `https://github.com/nj4x/peer-agent-kit.git`)
 - `PEER_AGENT_KIT_INSTALL_DIR` — Installation directory (default: `$HOME/.local/share/peer-agent-kit`)
+- `PEER_AGENT_KIT_INSTALL_SKILL=0` — Skip the peer-agent skill install (same as `--no-install-skill`)
+- `PEER_AGENT_KIT_REPLACE_SKILL` — `1` replaces a stale skill copy without asking, `0` always keeps it (see below)
 
 ## Manual Install
 
@@ -28,6 +30,12 @@ Environment overrides:
 ./install.sh                    # installs kit, registers MCP server, builds and symlinks extension, installs peer-agent skill
 ./install.sh --no-extension     # skips extension install
 ./install.sh --no-install-skill # skips the peer-agent skill install (bring your own)
+```
+
+The skill is installed as a symlink to the kit copy, so kit updates reach new sessions with no copy step. If `$CLAUDE_CONFIG_DIR/skills/peer-agent/SKILL.md` already exists and differs from the kit copy, `install.sh` and `update.sh` print a warning and ask before they replace it. The replaced copy is backed up and `uninstall.sh` puts it back. Set `PEER_AGENT_KIT_REPLACE_SKILL=1` to agree in advance, or `PEER_AGENT_KIT_REPLACE_SKILL=0` to always keep your copy. The bootstrap one-liner has no terminal for the prompt, so set the variable on `bash`, not on `curl`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nj4x/peer-agent-kit/main/bootstrap.sh | PEER_AGENT_KIT_REPLACE_SKILL=1 bash
 ```
 
 To update:
@@ -55,7 +63,7 @@ Or if you cloned the repo manually:
 - `git` and `curl` (for bootstrap one-liner)
 - `~/.vscode/` directory (VS Code must be installed; extension install skipped with a warning if absent)
 
-The `peer-agent` skill and `vscode-agent-bridge` MCP server are bundled; `install.sh` places them in `$CLAUDE_CONFIG_DIR/skills/peer-agent/` and registers the server in `~/.claude.json`.
+The `peer-agent` skill and `vscode-agent-bridge` MCP server are bundled; `install.sh` symlinks the skill into `$CLAUDE_CONFIG_DIR/skills/peer-agent/` and registers the server in `~/.claude.json`.
 
 ## Per-repository mode
 

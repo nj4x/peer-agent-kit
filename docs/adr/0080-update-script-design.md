@@ -10,6 +10,7 @@ authors: Roman Herasymenko
 # ADR 0080: Update Script Design for In-Place Kit Upgrades
 
 **Status:** Accepted  
+**Amended by:** ADR 0088 (skill symlink: steps 2 and 10)  
 **Date:** 2026-09-02  
 **Context:** Adopted from caveman-kit's `update.sh` pattern (commit 236104d) to enable in-place peer-agent-kit upgrades without uninstall+bootstrap cycle.
 
@@ -17,7 +18,7 @@ authors: Roman Herasymenko
 
 Implement `update.sh` script that:
 1. **Fetch remote** via `git fetch origin` to ensure remote-tracking refs are current before comparison.
-2. **Idempotency gate** via `kitSha` manifest field (git SHA of last-applied kit commit); compare remote HEAD SHA against stored `kitSha`; if equal, exit 0 immediately (no new commits on remote).
+2. **Idempotency gate** via `kitSha` manifest field (git SHA of last-applied kit commit); compare remote HEAD SHA against stored `kitSha`; if equal, exit 0 immediately (no new commits on remote). *Amended by ADR 0088: the skill check runs before this exit.*
 3. **Unpatch all three surfaces** in sequence: `settings.json`, `statusline.sh`, `~/.claude.json` MCP entry.
 4. **Pull kit repo** with `git pull origin $REMOTE_HEAD --ff-only` (fast-forward only), where `REMOTE_HEAD` is derived from `git symbolic-ref refs/remotes/origin/HEAD` (fallback: `main`). On failure (e.g., non-FF divergence), surfaces remain unpatched; user must resolve git divergence manually, then re-run `update.sh`.
 5. **Rebuild VS Code extension** via `npm ci && npm run install-dev` in `extension/`.
@@ -25,7 +26,7 @@ Implement `update.sh` script that:
 7. **Copy hook files** from `hooks/` to `~/.peer-agent-kit/hooks/`.
 8. **Overwrite Cline hook files** under `~/Documents/Cline/Hooks` (if present) to sync with repo.
 9. **Repatch all three surfaces** using freshly-pulled patch scripts.
-10. **Update skill** if `skillInstalledByKit=true`: overwrite `$CLAUDE_DIR/skills/peer-agent` from repo and repatch its frontmatter.
+10. ~~**Update skill** if `skillInstalledByKit=true`: overwrite `$CLAUDE_DIR/skills/peer-agent` from repo and repatch its frontmatter.~~ *Superseded by ADR 0088: the skill is a symlink to the kit copy, synced before step 9.*
 11. **Write `kitSha`** to manifest (atomic temp-file-then-rename) and exit 0.
 
 ## Rationale
@@ -49,5 +50,5 @@ Implement `update.sh` script that:
 - **Non-FF divergence unrecoverable by re-run:** If `git pull --ff-only` fails due to non-fast-forward history, user must resolve divergence manually (e.g., `git reset --hard origin/$REMOTE_HEAD` or rebase) before re-running.
 - **Cline hook files overwritten without backup:** Files under `~/Documents/Cline/Hooks` are overwritten in place; no backup is created. User modifications to those files will be lost on each update.
 - **No new backups created for settings/statusline/claude.json on update:** `update.sh` delegates all file mutations to the existing unpatch/patch scripts; it creates no additional backups beyond those already in `~/.peer-agent-kit/backup/` from install time.
-- **Skill updates only if `skillInstalledByKit=true`:** In-repo skill changes propagate automatically on update; external skill sources (if added later) would need separate versioning.
+- *(Superseded by ADR 0088.)* **Skill updates only if `skillInstalledByKit=true`:** In-repo skill changes propagate automatically on update; external skill sources (if added later) would need separate versioning.
 - **README documentation:** Add "To update:" guidance alongside "To uninstall:" sections (both quick-install and manual-install paths).

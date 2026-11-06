@@ -79,6 +79,14 @@ case "$cmd" in
     fi
     exit 1
     ;;
+  show)
+    # git show <sha>:skills/peer-agent/SKILL.md - old kit version, if the test sets one
+    if [[ -n "${FAKE_OLD_SKILL:-}" && -f "$FAKE_OLD_SKILL" ]]; then
+      cat "$FAKE_OLD_SKILL"
+      exit 0
+    fi
+    exit 1
+    ;;
   rev-parse)
     # git rev-parse origin/main or git rev-parse HEAD
     if [[ "$*" == *"origin/main"* ]]; then
@@ -268,4 +276,173 @@ EOF
 
   # Manifest kitSha should remain unchanged
   grep -q '"kitSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "$HOME/.peer-agent-kit/manifest.json"
+}
+
+# --- Skill symlink (ADR 0088, issue #33) -------------------------------------
+
+# write_manifest <skillInstalledByKit> <kitSha>
+write_manifest() {
+  mkdir -p "$HOME/.peer-agent-kit"
+  printf '{\n  "claudeDir": "%s",\n  "mcpPriorEntry": null,\n  "pluginRoot": "%s",\n  "skillInstalledByKit": %s,\n  "skillBackup": null,\n  "kitSha": "%s",\n  "completed": true\n}\n' \
+    "$CLAUDE_CONFIG_DIR" "$CLAUDE_CONFIG_DIR" "$1" "$2" > "$HOME/.peer-agent-kit/manifest.json"
+}
+
+seed_stale_skill() {
+  mkdir -p "$CLAUDE_CONFIG_DIR/skills/peer-agent"
+  printf -- '---\nname: peer-agent\n---\nQuick question or small task: `ask_peer_agent`\n' \
+    > "$CLAUDE_CONFIG_DIR/skills/peer-agent/SKILL.md"
+}
+
+SKILL_BACKUP() { echo "$HOME/.peer-agent-kit-skill-backup"; }
+kit_skill_sum() { shasum "$KIT_DIR/skills/peer-agent/SKILL.md" | cut -d' ' -f1; }
+
+skill_is_kit_link() {
+  [ -L "$CLAUDE_CONFIG_DIR/skills/peer-agent" ] \
+    && [ "$(cd -P "$CLAUDE_CONFIG_DIR/skills/peer-agent" && pwd)" = "$KIT_DIR/skills/peer-agent" ]
+}
+
+UP_TO_DATE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+BEHIND=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+@test "up-to-date kit with a stale user skill copy still warns about it" {
+  write_manifest false "$UP_TO_DATE"
+  seed_stale_skill
+  cd "$KIT_DIR"
+  run bash "$KIT_DIR/update.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Kit is already up to date"* ]]
+  [[ "$output" == *"differs from the kit copy"* ]]
+  run skill_is_kit_link
+  [ "$status" -ne 0 ]
+}
+
+@test "kit-installed skill copy from an older install becomes the kit symlink" {
+  write_manifest true "$BEHIND"
+  mkdir -p "$CLAUDE_CONFIG_DIR/skills"
+  cp -r "$KIT_DIR/skills/peer-agent" "$CLAUDE_CONFIG_DIR/skills/peer-agent"
+  before="$(kit_skill_sum)"
+  cd "$KIT_DIR"
+  run bash "$KIT_DIR/update.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  skill_is_kit_link
+  [ "$(kit_skill_sum)" = "$before" ]
+  grep -q "\"pluginRoot\": \"$KIT_DIR\"" "$HOME/.peer-agent-kit/manifest.json"
+  grep -q "CLAUDE_PLUGIN_ROOT='$KIT_DIR'" "$CLAUDE_CONFIG_DIR/settings.json"
+}
+
+@test "stale user skill copy with PEER_AGENT_KIT_REPLACE_SKILL=1 is backed up, recorded, and linked" {
+  write_manifest false "$BEHIND"
+  seed_stale_skill
+  cd "$KIT_DIR"
+  PEER_AGENT_KIT_REPLACE_SKILL=1 run bash "$KIT_DIR/update.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  skill_is_kit_link
+  grep -q 'ask_peer_agent' "$(SKILL_BACKUP)/SKILL.md"
+  grep -q "\"skillReplacedBackup\": \"$(SKILL_BACKUP)\"" "$HOME/.peer-agent-kit/manifest.json"
+  grep -q "\"kitSha\": \"$UP_TO_DATE\"" "$HOME/.peer-agent-kit/manifest.json"
+  grep -q "\"pluginRoot\": \"$KIT_DIR\"" "$HOME/.peer-agent-kit/manifest.json"
+  grep -q "CLAUDE_PLUGIN_ROOT='$KIT_DIR'" "$CLAUDE_CONFIG_DIR/settings.json"
+}
+
+@test "up-to-date kit: replacing a stale copy symlinked from another tree repoints settings.json at the kit" {
+  write_manifest false "$UP_TO_DATE"
+  mkdir -p "$HOME/dotfiles/skills/peer-agent" "$CLAUDE_CONFIG_DIR/skills"
+  printf -- '---\nname: peer-agent\n---\nold `ask_peer_agent`\n' > "$HOME/dotfiles/skills/peer-agent/SKILL.md"
+  ln -s "$HOME/dotfiles/skills/peer-agent" "$CLAUDE_CONFIG_DIR/skills/peer-agent"
+  node "$KIT_DIR/lib/settings-patch.js" "$CLAUDE_CONFIG_DIR/settings.json" "$HOME/.peer-agent-kit/hooks" "$HOME/dotfiles"
+  cd "$KIT_DIR"
+  PEER_AGENT_KIT_REPLACE_SKILL=1 run bash "$KIT_DIR/update.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  skill_is_kit_link
+  grep -q "\"pluginRoot\": \"$KIT_DIR\"" "$HOME/.peer-agent-kit/manifest.json"
+  grep -q "CLAUDE_PLUGIN_ROOT='$KIT_DIR'" "$CLAUDE_CONFIG_DIR/settings.json"
+  ! grep -q "CLAUDE_PLUGIN_ROOT='$HOME/dotfiles'" "$CLAUDE_CONFIG_DIR/settings.json" || false
+  grep -q 'ask_peer_agent' "$HOME/dotfiles/skills/peer-agent/SKILL.md"
+}
+
+@test "stale user skill copy is not replaced when a replaced-skill backup already exists" {
+  write_manifest false "$UP_TO_DATE"
+  seed_stale_skill
+  mkdir -p "$(SKILL_BACKUP)"
+  echo first > "$(SKILL_BACKUP)/SKILL.md"
+  cd "$KIT_DIR"
+  PEER_AGENT_KIT_REPLACE_SKILL=1 run bash "$KIT_DIR/update.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ln -s $KIT_DIR/skills/peer-agent"* ]]
+  run skill_is_kit_link
+  [ "$status" -ne 0 ]
+  [ "$(cat "$(SKILL_BACKUP)/SKILL.md")" = "first" ]
+}
+
+@test "kit-installed copy equal to the previous kit version becomes the symlink without a prompt" {
+  write_manifest true "$BEHIND"
+  # The pull changed SKILL.md: the copy matches the old version, not the new one.
+  export FAKE_OLD_SKILL="$HOME/old-skill.md"
+  printf -- '---\nname: peer-agent\n---\nold kit rules\n' > "$FAKE_OLD_SKILL"
+  mkdir -p "$CLAUDE_CONFIG_DIR/skills/peer-agent"
+  cp "$FAKE_OLD_SKILL" "$CLAUDE_CONFIG_DIR/skills/peer-agent/SKILL.md"
+  cd "$KIT_DIR"
+  run bash "$KIT_DIR/update.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  skill_is_kit_link
+  [[ "$output" != *"differs from the kit copy"* ]]
+  grep -q "CLAUDE_PLUGIN_ROOT='$KIT_DIR'" "$CLAUDE_CONFIG_DIR/settings.json"
+}
+
+@test "kit-installed flag with a differing copy never deletes it without consent" {
+  write_manifest true "$BEHIND"
+  seed_stale_skill
+  cd "$KIT_DIR"
+  run bash "$KIT_DIR/update.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"differs from the kit copy"* ]]
+  run skill_is_kit_link
+  [ "$status" -ne 0 ]
+  grep -q 'ask_peer_agent' "$CLAUDE_CONFIG_DIR/skills/peer-agent/SKILL.md"
+}
+
+@test "kit-installed flag with a differing copy and PEER_AGENT_KIT_REPLACE_SKILL=1 backs the copy up" {
+  write_manifest true "$BEHIND"
+  seed_stale_skill
+  cd "$KIT_DIR"
+  PEER_AGENT_KIT_REPLACE_SKILL=1 run bash "$KIT_DIR/update.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  skill_is_kit_link
+  grep -q 'ask_peer_agent' "$(SKILL_BACKUP)/SKILL.md"
+}
+
+@test "stale copy is not replaced when the manifest already records a replaced-skill backup" {
+  write_manifest false "$UP_TO_DATE"
+  node -e "const fs=require('fs');const p=process.argv[1];const m=JSON.parse(fs.readFileSync(p,'utf8'));m.skillReplacedBackup=process.argv[2];fs.writeFileSync(p,JSON.stringify(m))" \
+    "$HOME/.peer-agent-kit/manifest.json" "$HOME/elsewhere"
+  seed_stale_skill
+  cd "$KIT_DIR"
+  PEER_AGENT_KIT_REPLACE_SKILL=1 run bash "$KIT_DIR/update.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ln -s $KIT_DIR/skills/peer-agent"* ]]
+  run skill_is_kit_link
+  [ "$status" -ne 0 ]
+  [ ! -e "$(SKILL_BACKUP)" ]
+}
+
+@test "kit skill symlink is left as is" {
+  write_manifest true "$BEHIND"
+  mkdir -p "$CLAUDE_CONFIG_DIR/skills"
+  ln -s "$KIT_DIR/skills/peer-agent" "$CLAUDE_CONFIG_DIR/skills/peer-agent"
+  cd "$KIT_DIR"
+  run bash "$KIT_DIR/update.sh" </dev/null 2>&1
+
+  [ "$status" -eq 0 ]
+  skill_is_kit_link
+  [[ "$output" != *"differs from the kit copy"* ]]
+  [[ "$output" != *"Linking peer-agent skill"* ]]
 }
