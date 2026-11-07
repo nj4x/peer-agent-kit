@@ -22,6 +22,8 @@ Mode holds for the whole session until changed. Default: **full**. Switch: `/pee
 | **full** | Main agent designs, plans, critiques, accepts. Delegate: filesystem/codebase search; mechanical edits fully specified in advance (rename, find/replace, apply a given patch); running commands to report output; execution of an already-developed plan or a discrete slice of it; drafting code changes whose design is already decided; validating reports or claims (independent second read); straightforward skill-based tasks (e.g. render a markdown file via html-view). Stays local: design and architecture, planning, resolving ambiguity, anything depending on conversation context the peer lacks, and final acceptance of every delegated result. |
 | **max** | Delegate by default: filesystem/codebase search; mechanical edits fully specified in advance (rename, find/replace, apply a given patch); running commands to report output; execution of an already-developed plan or a discrete slice of it; drafting code changes whose design is already decided; validating reports or claims (independent second read); straightforward skill-based tasks; multi-step implementation, research, and debugging. Prefer one well-briefed delegation over doing work locally — batch related work into fewer larger delegations. Invocation is explicit — skill-driven or user-invoked via `submit_to_peer_agent`. Local-only floor: conversation and judgement calls with the user, mode changes, composing the delegation prompts, and verification/acceptance of delegated work. |
 
+Precedence: the active mode's row wins over general guidance to do small work inline. Where the row lists the work, single commands and small tasks are covered too.
+
 Worked examples:
 
 - lite: "find every call site of `parseConfig`" — delegate (search)
@@ -42,6 +44,7 @@ These apply at every mode.
 2. Brief the peer like a colleague with zero context: the goal, relevant file paths, constraints, and the report format you expect back.
 3. Use the blocking-poll idiom: call `submit_to_peer_agent`, then immediately collect with `poll_peer_agent(poll_timeout_seconds=180)` (or your chosen timeout). When the delegation needs multiple submit/poll cycles, spawn a general-purpose subagent to run the loop — it follows the same active mode's rules; there is no dedicated peer-agent agent type.
 4. Verify before reporting done: read the peer's answer and diff, then accept or redo. Acceptance stays local at every mode, including max.
+5. Disclose skips: if you do work locally that the active row lists as delegable, while the mode is `lite`, `full`, or `max`, tell the user in one line, with the reason — once per batch of skipped work. After the one-time `instance_down` notice (see Bridge down), no per-task disclosure is needed.
 
 The first call spawns the dedicated VS Code window if it is not already up — expect extra latency on a cold start.
 
